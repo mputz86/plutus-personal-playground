@@ -43,38 +43,34 @@ import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
 
 data Bid = Bid
-        { bBid    :: Ada
-        , bBidder :: PubKeyHash
-        }
-    deriving stock (Haskell.Eq, Haskell.Show, Generic)
-    deriving anyclass (ToJSON, FromJSON)
+  { bBid :: Ada,
+    bBidder :: PubKeyHash
+  }
+  deriving stock (Haskell.Eq, Haskell.Show, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
 PlutusTx.unstableMakeIsData ''Bid
 
-
 newtype ParallelAuctionDatum = ParallelAuctionDatum
-    { highestBid :: Bid
-    }
-    deriving stock (Haskell.Eq, Haskell.Show, Generic)
-    deriving anyclass (ToJSON, FromJSON)
+  { highestBid :: Bid
+  }
+  deriving stock (Haskell.Eq, Haskell.Show, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionDatum
 
-
 emptyParallelAuctionDatum :: PubKeyHash -> ParallelAuctionDatum
 emptyParallelAuctionDatum self = ParallelAuctionDatum (Bid 0 self)
-
 
 data ParallelAuctionInput = InputClose | InputBid Ada
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
-
 {-# INLINEABLE mkValidator #-}
 mkValidator :: ParallelAuctionDatum -> ParallelAuctionInput -> ScriptContext -> Bool
 mkValidator _ InputClose _ = True
 mkValidator (ParallelAuctionDatum (Bid curBid curPk)) (InputBid newBid) ctx =
-    curBid < newBid
+  curBid < newBid
 
 data ParallelAuction
 
@@ -186,11 +182,12 @@ bid b = do
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
   let datums :: [ParallelAuctionDatum] =
-          utxoMap ^.. folded
-          . Control.Lens.to txOutTxDatum
-          . _Just
-          . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
-          . _Just
+        utxoMap
+          ^.. folded
+            . Control.Lens.to txOutTxDatum
+            . _Just
+            . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
+            . _Just
   logI'' "UTxO datums" "datums" $ show datums
   let lookups =
         Constraints.unspentOutputs utxoMap
@@ -214,11 +211,12 @@ bid b = do
   utxoMap <- utxoAt scrAddress
   logInfo @String . printf $ "after bid, utxo map : " <> show (size utxoMap) -- <> ", " <> show (keys utxoMap)
   let datums :: [ParallelAuctionDatum] =
-          utxoMap ^.. folded
-          . Control.Lens.to txOutTxDatum
-          . _Just
-          . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
-          . _Just
+        utxoMap
+          ^.. folded
+            . Control.Lens.to txOutTxDatum
+            . _Just
+            . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
+            . _Just
   PlutusTx.Prelude.mapM (logI'' "UTxO datums" "datums") $ fmap show datums
 
   -- TODO How to know which token?
