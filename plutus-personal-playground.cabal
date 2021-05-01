@@ -10,8 +10,8 @@ License-files:       LICENSE
 
 library
   hs-source-dirs:      src
-  exposed-modules:     ParallelContract
-                     , ParallelContractTrace
+  exposed-modules:     ParallelAuction
+                     , ParallelAuctionTrace
                      , Plutus.Contracts.Currency
                      , Plutus.Contracts.PubKey
   build-depends:       aeson

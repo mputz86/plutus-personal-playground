@@ -12,7 +12,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
-module ParallelContract where
+module ParallelAuction where
 
 import Control.Lens
 import Control.Monad hiding (fmap)
@@ -42,30 +42,53 @@ import Text.Printf (printf)
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
 
--- data Config = Config
---     { threadCount :: Int
---     , tokenId :: Int
---     } deriving (Eq, Show)
+data Bid = Bid
+        { bBid    :: Ada
+        , bBidder :: PubKeyHash
+        }
+    deriving stock (Haskell.Eq, Haskell.Show, Generic)
+    deriving anyclass (ToJSON, FromJSON)
 
--- data State = Start | Bid Integer | Close
+PlutusTx.unstableMakeIsData ''Bid
+
+
+newtype ParallelAuctionDatum = ParallelAuctionDatum
+    { highestBid :: Bid
+    }
+    deriving stock (Haskell.Eq, Haskell.Show, Generic)
+    deriving anyclass (ToJSON, FromJSON)
+
+PlutusTx.unstableMakeIsData ''ParallelAuctionDatum
+
+
+emptyParallelAuctionDatum :: PubKeyHash -> ParallelAuctionDatum
+emptyParallelAuctionDatum self = ParallelAuctionDatum (Bid 0 self)
+
+
+data ParallelAuctionInput = InputClose | InputBid Ada
+
+PlutusTx.unstableMakeIsData ''ParallelAuctionInput
+
 
 {-# INLINEABLE mkValidator #-}
-mkValidator :: () -> () -> ScriptContext -> Bool
-mkValidator _ () _ = True
+mkValidator :: ParallelAuctionDatum -> ParallelAuctionInput -> ScriptContext -> Bool
+mkValidator _ InputClose _ = True
+mkValidator (ParallelAuctionDatum (Bid curBid curPk)) (InputBid newBid) ctx =
+    curBid < newBid
 
-data ParallelContract
+data ParallelAuction
 
-instance Scripts.ScriptType ParallelContract where
-  type DatumType ParallelContract = ()
-  type RedeemerType ParallelContract = ()
+instance Scripts.ScriptType ParallelAuction where
+  type DatumType ParallelAuction = ParallelAuctionDatum
+  type RedeemerType ParallelAuction = ParallelAuctionInput
 
-inst :: Scripts.ScriptInstance ParallelContract
+inst :: Scripts.ScriptInstance ParallelAuction
 inst =
-  Scripts.validator @ParallelContract
+  Scripts.validator @ParallelAuction
     $$(PlutusTx.compile [||mkValidator||])
     $$(PlutusTx.compile [||wrap||])
   where
-    wrap = Scripts.wrapValidator @() @()
+    wrap = Scripts.wrapValidator @ParallelAuctionDatum @ParallelAuctionInput
 
 validator :: Validator
 validator = Scripts.validatorScript inst
@@ -77,21 +100,21 @@ scrAddress = scriptAddress validator
 -- Contract
 --
 
-data ParallelContractError
+data ParallelAuctionError
   = TContractError ContractError
   | TCurrencyError Currency.CurrencyError
   deriving stock (Haskell.Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
-makeClassyPrisms ''ParallelContractError
+makeClassyPrisms ''ParallelAuctionError
 
-instance Currency.AsCurrencyError ParallelContractError where
+instance Currency.AsCurrencyError ParallelAuctionError where
   _CurrencyError = _TCurrencyError
 
-instance AsContractError ParallelContractError where
+instance AsContractError ParallelAuctionError where
   _ContractError = _TContractError
 
-type ParallelContractSchema =
+type ParallelAuctionSchema =
   BlockchainActions
     .\/ Endpoint "start" ()
     .\/ Endpoint "bid" Integer
@@ -102,7 +125,7 @@ type ParallelContractSchema =
 -- TODO
 -- - Make sure start can only be called once
 -- - Make sure close only closes if done
-endpoints :: Contract () ParallelContractSchema ParallelContractError ()
+endpoints :: Contract () ParallelAuctionSchema ParallelAuctionError ()
 endpoints = (start' `select` bid' `select` close') >> endpoints
   where
     start' = endpoint @"start" >> start
@@ -110,18 +133,19 @@ endpoints = (start' `select` bid' `select` close') >> endpoints
     close' = endpoint @"close" >> close
 
 threadCount :: Int
-threadCount = 10
+threadCount = 3
 
-start :: Contract w ParallelContractSchema ParallelContractError ()
+start :: Contract w ParallelAuctionSchema ParallelAuctionError ()
 start = do
   ownPk <- ownPubKey
+  let ownPkHash = pubKeyHash ownPk
   -- Forge tokens for auction threads
   c :: Currency.OneShotCurrency <-
     Currency.forgeContract (pubKeyHash ownPk) [("auction-theads", fromIntegral threadCount)]
   let cV = Currency.forgedValue c
       -- Create one UTxO for every single value
       cVs = splitToSingleValues cV
-      txConstrs = createConstraintsForValues cVs
+      txConstrs = createConstraintsForValues ownPkHash cVs
   logInfo @String $ "submit for tx confirmation"
   -- Submit tx
   ledgerTx <- submitTxConstraints inst txConstrs
@@ -131,10 +155,10 @@ start = do
   utxoMap <- utxoAt scrAddress
   logInfo @String . printf $ "started, utxo map : " <> show (size utxoMap) -- <> ", " <> show (keys utxoMap)
   where
-    createConstraintForValue :: Value -> TxConstraints () ()
-    createConstraintForValue = mustPayToTheScript ()
-    createConstraintsForValues :: [Value] -> TxConstraints () ()
-    createConstraintsForValues = mconcat . fmap createConstraintForValue
+    createConstraintForValue :: PubKeyHash -> Value -> TxConstraints ParallelAuctionInput ParallelAuctionDatum
+    createConstraintForValue self = mustPayToTheScript (emptyParallelAuctionDatum self)
+    createConstraintsForValues :: PubKeyHash -> [Value] -> TxConstraints ParallelAuctionInput ParallelAuctionDatum
+    createConstraintsForValues self = mconcat . fmap (createConstraintForValue self)
 
 splitToSingleValues :: Value -> [Value]
 splitToSingleValues v = do
@@ -142,10 +166,14 @@ splitToSingleValues v = do
   -- TODO: Unsafe?
   replicate (fromIntegral amt) $ Value.singleton s tn 1
 
-bid :: Integer -> Contract w ParallelContractSchema ParallelContractError ()
+bid :: Integer -> Contract w ParallelAuctionSchema ParallelAuctionError ()
 bid b = do
   ownPk <- ownPubKey
-  logI' "Place bid" [("pk", show ownPk), ("bid", show b)]
+  let ownPkHash = pubKeyHash ownPk
+      adaBid = Ada.Lovelace b
+      inputBid = InputBid adaBid
+      outputBid = ParallelAuctionDatum $ Bid adaBid ownPkHash
+  logI' "Placing bid" [("pk", show ownPk), ("bid", show b)]
   -- Verify current state
   -- TODO Filter out invalid/malicious utxos; how to know which token?
   utxoMap <- utxoAt scrAddress
@@ -157,12 +185,20 @@ bid b = do
       utxoToBid@(utxoToBidRef, TxOutTx _ (TxOut addr threadToken _)) = utxoIndex `elemAt` utxoMap
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
+  let datums :: [ParallelAuctionDatum] =
+          utxoMap ^.. folded
+          . Control.Lens.to txOutTxDatum
+          . _Just
+          . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
+          . _Just
+  logI'' "UTxO datums" "datums" $ show datums
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups inst
       -- Built constrainton our own
-      inputConstraints = [InputConstraint {icRedeemer = (), icTxOutRef = utxoToBidRef}]
-      outputConstraints = [OutputConstraint {ocDatum = (), ocValue = threadToken}]
+      inputConstraints = [InputConstraint {icRedeemer = inputBid, icTxOutRef = utxoToBidRef}]
+      -- FIXME: Datum should be the updated one from the existing tx
+      outputConstraints = [OutputConstraint {ocDatum = outputBid, ocValue = threadToken}]
       txConstrs =
         TxConstraints
           { txConstraints = [],
@@ -174,18 +210,24 @@ bid b = do
   logI "Waiting for tx confirmation"
   void . awaitTxConfirmed . txId $ ledgerTx
 
-  -- Print utxo
+  -- Print UTxO
   utxoMap <- utxoAt scrAddress
   logInfo @String . printf $ "after bid, utxo map : " <> show (size utxoMap) -- <> ", " <> show (keys utxoMap)
+  let datums :: [ParallelAuctionDatum] =
+          utxoMap ^.. folded
+          . Control.Lens.to txOutTxDatum
+          . _Just
+          . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
+          . _Just
+  PlutusTx.Prelude.mapM (logI'' "UTxO datums" "datums") $ fmap show datums
 
   -- TODO How to know which token?
   -- Use this UTxO to do the bidding
   pure ()
 
-close :: Contract w ParallelContractSchema ParallelContractError ()
+close :: Contract w ParallelAuctionSchema ParallelAuctionError ()
 close = do
-  ownPk <- ownPubKey
-  logInfo @String . printf $ "closing " <> show ownPk
+  logI "Closing auction"
 
 -- Helper
 logI :: String -> Contract w s e ()
