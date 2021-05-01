@@ -4,6 +4,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
@@ -23,6 +24,7 @@ import Data.Void (Void)
 import GHC.Generics (Generic)
 import Ledger hiding (singleton)
 import Ledger.Ada as Ada
+import Ledger.AddressMap (UtxoMap)
 import Ledger.Constraints as Constraints
 import qualified Ledger.Constraints.OffChain as Constraints
 import Ledger.Constraints.TxConstraints (InputConstraint (..), OutputConstraint (..))
@@ -71,12 +73,9 @@ validator = Scripts.validatorScript inst
 scrAddress :: Ledger.Address
 scrAddress = scriptAddress validator
 
-type ParallelContractSchema =
-  BlockchainActions
-    .\/ Endpoint "start" ()
-    .\/ Endpoint "bid" Integer
-
--- .\/ Endpoint "close" ()
+--
+-- Contract
+--
 
 data ParallelContractError
   = TContractError ContractError
@@ -92,6 +91,24 @@ instance Currency.AsCurrencyError ParallelContractError where
 instance AsContractError ParallelContractError where
   _ContractError = _TContractError
 
+type ParallelContractSchema =
+  BlockchainActions
+    .\/ Endpoint "start" ()
+    .\/ Endpoint "bid" Integer
+    .\/ Endpoint "close" ()
+
+-- Get utxos
+
+-- TODO
+-- - Make sure start can only be called once
+-- - Make sure close only closes if done
+endpoints :: Contract () ParallelContractSchema ParallelContractError ()
+endpoints = (start' `select` bid' `select` close') >> endpoints
+  where
+    start' = endpoint @"start" >> start
+    bid' = endpoint @"bid" >>= bid
+    close' = endpoint @"close" >> close
+
 threadCount :: Int
 threadCount = 10
 
@@ -105,7 +122,7 @@ start = do
       -- Create one UTxO for every single value
       cVs = splitToSingleValues cV
       txConstrs = createConstraintsForValues cVs
-  logInfo @String $ printf "submit for tx confirmation"
+  logInfo @String $ "submit for tx confirmation"
   -- Submit tx
   ledgerTx <- submitTxConstraints inst txConstrs
   logInfo @String $ printf "wait for tx confirmation"
@@ -128,17 +145,18 @@ splitToSingleValues v = do
 bid :: Integer -> Contract w ParallelContractSchema ParallelContractError ()
 bid b = do
   ownPk <- ownPubKey
-  logInfo @String . printf $ "bidding " <> show b
+  logI' "Place bid" [("pk", show ownPk), ("bid", show b)]
   -- Verify current state
   -- TODO Filter out invalid/malicious utxos; how to know which token?
   utxoMap <- utxoAt scrAddress
-  logInfo @String . printf $ "utxo map : " <> show (size utxoMap) <> ", " <> show (keys utxoMap)
+  logUTxOSize Nothing utxoMap
   -- Select an UTxOs by using public key hash and thread count
   let pkHash = pubKeyHash ownPk
       utxoIndex :: Int = hash pkHash `mod` threadCount
       -- Ensure utxoMap has the same amount as `threadCount`
       utxoToBid@(utxoToBidRef, TxOutTx _ (TxOut addr threadToken _)) = utxoIndex `elemAt` utxoMap
-  logInfo @String $ printf "Choosing UTxO number " <> show utxoIndex
+
+  logI'' "Choosing UTxO" "index" $ show utxoIndex
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups inst
@@ -153,7 +171,7 @@ bid b = do
           }
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups txConstrs
-  logInfo @String $ printf "wait for tx confirmation"
+  logI "Waiting for tx confirmation"
   void . awaitTxConfirmed . txId $ ledgerTx
 
   -- Print utxo
@@ -169,15 +187,22 @@ close = do
   ownPk <- ownPubKey
   logInfo @String . printf $ "closing " <> show ownPk
 
--- Get utxos
+-- Helper
+logI :: String -> Contract w s e ()
+logI = logInfo @String
 
--- TODO
--- - Make sure start can only be called once
--- - Make sure close only closes if done
-endpoints :: Contract () ParallelContractSchema ParallelContractError ()
-endpoints = (start' `select` bid') >> endpoints
+-- TODO: Replace value tuples with HList.
+logI' :: String -> [(String, String)] -> Contract w s e ()
+logI' t m = logInfo @String $ t <> printKeyValues m
   where
-    start' = endpoint @"start" >> start
-    bid' = endpoint @"bid" >>= bid
+    printKeyValues [] = ""
+    printKeyValues m = ": " <> mconcat (fmap kvToString m)
+    kvToString (k, v) = k <> "=" <> show v
 
--- close' = endpoint @"close" >> close
+logI'' :: String -> String -> String -> Contract w s e ()
+logI'' t k v = logI' t [(k, v)]
+
+logUTxOSize :: Maybe String -> UtxoMap -> Contract w s e ()
+logUTxOSize title utxoMap =
+  let t = fromMaybe "UTxO size of script" title
+   in logI'' t "size" $ show (size utxoMap)
