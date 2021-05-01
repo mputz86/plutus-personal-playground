@@ -148,8 +148,7 @@ start = do
   logInfo @String $ printf "wait for tx confirmation"
   void . awaitTxConfirmed . txId $ ledgerTx
   -- Verify current state
-  utxoMap <- utxoAt scrAddress
-  logInfo @String . printf $ "started, utxo map : " <> show (size utxoMap) -- <> ", " <> show (keys utxoMap)
+  printUTxODatums
   where
     createConstraintForValue :: PubKeyHash -> Value -> TxConstraints ParallelAuctionInput ParallelAuctionDatum
     createConstraintForValue self = mustPayToTheScript (emptyParallelAuctionDatum self)
@@ -181,14 +180,6 @@ bid b = do
       utxoToBid@(utxoToBidRef, TxOutTx _ (TxOut addr threadToken _)) = utxoIndex `elemAt` utxoMap
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
-  let datums :: [ParallelAuctionDatum] =
-        utxoMap
-          ^.. folded
-            . Control.Lens.to txOutTxDatum
-            . _Just
-            . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
-            . _Just
-  logI'' "UTxO datums" "datums" $ show datums
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups inst
@@ -208,16 +199,7 @@ bid b = do
   void . awaitTxConfirmed . txId $ ledgerTx
 
   -- Print UTxO
-  utxoMap <- utxoAt scrAddress
-  logInfo @String . printf $ "after bid, utxo map : " <> show (size utxoMap) -- <> ", " <> show (keys utxoMap)
-  let datums :: [ParallelAuctionDatum] =
-        utxoMap
-          ^.. folded
-            . Control.Lens.to txOutTxDatum
-            . _Just
-            . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
-            . _Just
-  PlutusTx.Prelude.mapM (logI'' "UTxO datums" "datums") $ fmap show datums
+  printUTxODatums
 
   -- TODO How to know which token?
   -- Use this UTxO to do the bidding
@@ -228,6 +210,20 @@ close = do
   logI "Closing auction"
 
 -- Helper
+printUTxODatums :: Contract w ParallelAuctionSchema ParallelAuctionError ()
+printUTxODatums = do
+  utxoMap <- utxoAt scrAddress
+  logInfo @String . printf $ "after bid, utxo map : " <> show (size utxoMap) -- <> ", " <> show (keys utxoMap)
+  let datums :: [ParallelAuctionDatum] =
+        utxoMap
+          ^.. folded
+            . Control.Lens.to txOutTxDatum
+            . _Just
+            . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
+            . _Just
+  PlutusTx.Prelude.mapM_ (logI'' "UTxO datums" "datums") $ fmap show datums
+
+
 logI :: String -> Contract w s e ()
 logI = logInfo @String
 
