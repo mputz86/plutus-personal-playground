@@ -1,7 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -9,20 +8,21 @@
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-
 {-# OPTIONS_GHC -Wno-missing-signatures #-}
+
 module ParallelAuction where
 
 import Control.Lens
 import Control.Monad hiding (fmap)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Hashable (hash)
-import qualified Data.Map as Map
 import qualified Data.List as List
+import qualified Data.Map as Map
 import Data.Text (Text, pack)
 import Data.Void (Void)
 import GHC.Generics (Generic)
@@ -83,12 +83,12 @@ instance Haskell.Ord Bid where
 PlutusTx.unstableMakeIsData ''Bid
 
 data ParallelAuctionDatum
-  -- | State which holds asset
-  = Hold
-  -- | State for bidding threads
-  | Bidding {dHighestBid :: Bid}
-  -- | Auction was closed
-  | Finished
+  = -- | State which holds asset
+    Hold
+  | -- | State for bidding threads
+    Bidding {dHighestBid :: Bid}
+  | -- | Auction was closed
+    Finished
   deriving stock (Haskell.Eq, Haskell.Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
@@ -117,6 +117,7 @@ mkValidator params datum (InputBid bid) ctx@ScriptContext {scriptContextTxInfo =
 -- Output contains token
 
 mkValidator params _ InputClose _ = True
+
 -- Check on transaction
 -- - Must contain all (and only) inputs with thread token
 -- - Must select the higheset bid
@@ -222,15 +223,17 @@ start params = do
   ts <- createBiddingThreads ownPkHash (pThreadCount params)
   -- Create tx constraints
   let -- Constraint to pay one thread token to each thread with inital bidding state
-      distributeThreadTokensToThreads = mconcat $
-        fmap (mustPayToTheScript . Bidding $ Bid 0 ownPkHash) ts
+      distributeThreadTokensToThreads =
+        mconcat $
+          fmap (mustPayToTheScript . Bidding $ Bid 0 ownPkHash) ts
       -- Constraint to pay offered asset to script, hold in script until auction closes
       payAssetFromOwnerToScript =
         mustPayToTheScript Hold (pAsset params)
   logI "Starting auction"
-  ledgerTx <- submitTxConstraints scrInst $
+  ledgerTx <-
+    submitTxConstraints scrInst $
       distributeThreadTokensToThreads
-      <> payAssetFromOwnerToScript
+        <> payAssetFromOwnerToScript
   void . awaitTxConfirmed . txId $ ledgerTx
   logI "Started auction"
   -- Verify current state
@@ -250,6 +253,7 @@ bid (params, b) = do
   threadUtxoMap <- filterBiddingUTxOs <$> utxoAt (scrAddress params)
   let highestBid = highestBidInUTxOs threadUtxoMap
   logI'' "Checking if bidding highest for all UTxOs" "highest bid" (show highestBid)
+  -- TODO Add check against highest bid of all currently known UTxOs
   -- Only bid if own bid is higher than highest
   -- Select an UTxOs by using public key hash and thread count
   let utxoIndex :: Int = hash ownPkHash `mod` fromIntegral (pThreadCount params)
@@ -263,7 +267,7 @@ bid (params, b) = do
           <> Constraints.scriptInstanceLookups scrInst
       -- Built constraints on our own
       allowOnlyBeforeDeadline =
-          mustValidateIn validTo
+        mustValidateIn validTo
       -- FIXME: Datum should be the updated one from the existing tx
       -- FIXME: Use constraint creation methods and combine instead of manyally creating
       inputConstraints =
@@ -285,9 +289,10 @@ bid (params, b) = do
             txOwnOutputs = outputConstraints
           }
   -- Submit tx
-  ledgerTx <- submitTxConstraintsWith lookups $
+  ledgerTx <-
+    submitTxConstraintsWith lookups $
       allowOnlyBeforeDeadline
-      <> txConstrs
+        <> txConstrs
   logI "Waiting for tx confirmation"
   void . awaitTxConfirmed . txId $ ledgerTx
 
@@ -296,10 +301,10 @@ bid (params, b) = do
   printUTxODatums params
   pure ()
 
-
 close :: ParallelAuctionParams -> ParallelAuctionContract ()
 close params = do
   curSlot <- currentSlot
+  srcInst <- pure $ inst params
   let scrInst = inst params
       scr = validator params
       validFrom = Interval.from $ curSlot
@@ -327,24 +332,25 @@ close params = do
               <> Constraints.scriptInstanceLookups scrInst
               <> Constraints.otherScript scr
           allowOnlyAfterDeadline =
-              mustValidateIn validFrom
+            mustValidateIn validFrom
           payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
           payOwner =
-              mustSpendScriptOutput winningUtxoRef closeRedeemer
+            mustSpendScriptOutput winningUtxoRef closeRedeemer
               <> mustPayToPubKey (pOwner params) (Ada.toValue $ bBid highestBid)
           transferAsset =
-              mustSpendScriptOutput holdUtxoRef closeRedeemer
+            mustSpendScriptOutput holdUtxoRef closeRedeemer
               <> mustPayToPubKey (bBidder highestBid) (pAsset params)
           -- FIXME Thread tokens are not destroyed but kept in script. How to burn/destroy?
           burnThreadTokens =
-              mustPayToTheScript Finished threadTokenValueAll
+            mustPayToTheScript Finished threadTokenValueAll
       -- Submit tx
-      ledgerTx <- submitTxConstraintsWith lookups $
-            allowOnlyAfterDeadline
-              <> payBacks
-              <> payOwner
-              <> transferAsset
-              <> burnThreadTokens
+      ledgerTx <-
+        submitTxConstraintsWith lookups $
+          allowOnlyAfterDeadline
+            <> payBacks
+            <> payOwner
+            <> transferAsset
+            <> burnThreadTokens
       logI "Waiting for tx confirmation"
       void . awaitTxConfirmed . txId $ ledgerTx
 
@@ -359,11 +365,11 @@ close params = do
   where
     closeRedeemer = Redeemer $ PlutusTx.toData InputClose
     payBackBid utxoMap utxoRef =
-        -- FIXME Unsafe
-        let Just out = Map.lookup utxoRef utxoMap
-            Just (Bid b pkh) = txOutToBid out
-         in mustSpendScriptOutput utxoRef closeRedeemer
-              <> mustPayToPubKey pkh (Ada.toValue b)
+      -- FIXME Unsafe
+      let Just out = Map.lookup utxoRef utxoMap
+          Just (Bid b pkh) = txOutToBid out
+       in mustSpendScriptOutput utxoRef closeRedeemer
+            <> mustPayToPubKey pkh (Ada.toValue b)
 
 -- Helper
 createBiddingThreads ::
@@ -386,9 +392,9 @@ findMaxUTxORef utxoMap = do
   where
     step Nothing (ref, out) = Just (ref, out, [])
     step (Just (aref, aout, arefs)) (ref, out) =
-        case Haskell.compare (txOutToBid out) (txOutToBid aout) of
-          GT -> Just (ref, out, aref : arefs)
-          _ -> Just (aref, aout, ref : arefs)
+      case Haskell.compare (txOutToBid out) (txOutToBid aout) of
+        GT -> Just (ref, out, aref : arefs)
+        _ -> Just (aref, aout, ref : arefs)
 
 txOutToBid :: TxOutTx -> Maybe Bid
 txOutToBid o = txOutTxDatum o >>= datumToBid
