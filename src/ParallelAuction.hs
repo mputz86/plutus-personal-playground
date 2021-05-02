@@ -82,12 +82,11 @@ instance Haskell.Ord Bid where
 PlutusTx.unstableMakeIsData ''Bid
 
 data ParallelAuctionDatum
-  = Ongoing
-      { dHighestBid :: Bid
-      -- FIXME: Required in here? Or just check that it is preserve.
-      -- , dThreadToken :: Maybe Value.AssetClass
-      }
-  | Hold
+  -- | State which holds asset
+  = Hold
+  -- | State for bidding threads
+  | Bidding {dHighestBid :: Bid}
+  -- | Auction was closed
   | Finished
   deriving stock (Haskell.Eq, Haskell.Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -197,51 +196,46 @@ type ParallelAuctionSchema =
     .\/ Endpoint "bid" (ParallelAuctionParams, Integer)
     .\/ Endpoint "close" ParallelAuctionParams
 
+-- Simplify type for auction contract.
+type ParallelAuctionContract a = Contract () ParallelAuctionSchema ParallelAuctionError a
+
 -- Get utxos
 
 -- TODO
 -- - Make sure start can only be called once
 -- - Make sure close only closes if done
-endpoints :: Contract () ParallelAuctionSchema ParallelAuctionError ()
+endpoints :: ParallelAuctionContract ()
 endpoints = (start' `select` bid' `select` close') >> endpoints
   where
     start' = endpoint @"start" >>= start
     bid' = endpoint @"bid" >>= bid
     close' = endpoint @"close" >>= close
 
-start :: ParallelAuctionParams -> Contract w ParallelAuctionSchema ParallelAuctionError ()
+start :: ParallelAuctionParams -> ParallelAuctionContract ()
 start params = do
+  -- General values
   ownPk <- ownPubKey
   let ownPkHash = pubKeyHash ownPk
       scrInst = inst params
-  -- Forge tokens for auction threads
-  c :: Currency.OneShotCurrency <-
-    Currency.forgeContract (pubKeyHash ownPk) [("auction-threads", fromIntegral $ pThreadCount params)]
-  let cV = Currency.forgedValue c
-      -- Create one UTxO for every single value
-      cVs = splitToSingleValues cV
-      txConstrs = createConstraintsForValues ownPkHash cVs
-        <> mustPayToTheScript Hold (pAsset params)
-  logI "submit for tx confirmation"
-  -- Submit tx
-  ledgerTx <- submitTxConstraints scrInst txConstrs
-  logI "wait for tx confirmation"
+  -- Create bidding threads
+  ts <- createBiddingThreads ownPkHash (pThreadCount params)
+  -- Create tx constraints
+  let -- Constraint to pay one thread token to each thread with inital state, Bidding
+      distributeThreadTokensToThreads = mconcat $
+        fmap (mustPayToTheScript . Bidding $ Bid 0 ownPkHash) ts
+      -- Constraint to pay offered asset to script, kept in state Hold
+      payAssetFromOwnerToScript =
+        mustPayToTheScript Hold (pAsset params)
+  logI "Starting auction"
+  ledgerTx <- submitTxConstraints scrInst $
+      distributeThreadTokensToThreads
+      <> payAssetFromOwnerToScript
   void . awaitTxConfirmed . txId $ ledgerTx
+  logI "Started auction"
   -- Verify current state
   printUTxODatums params
-  where
-    createConstraintForValue :: PubKeyHash -> Value -> TxConstraints ParallelAuctionInput ParallelAuctionDatum
-    createConstraintForValue self = mustPayToTheScript (Ongoing $ Bid 0 self)
-    createConstraintsForValues :: PubKeyHash -> [Value] -> TxConstraints ParallelAuctionInput ParallelAuctionDatum
-    createConstraintsForValues self = mconcat . fmap (createConstraintForValue self)
 
-splitToSingleValues :: Value -> [Value]
-splitToSingleValues v = do
-  (s, tn, amt) <- Value.flattenValue v
-  -- TODO: Unsafe?
-  replicate (fromIntegral amt) $ Value.singleton s tn 1
-
-bid :: (ParallelAuctionParams, Integer) -> Contract w ParallelAuctionSchema ParallelAuctionError ()
+bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
 bid (params, b) = do
   ownPk <- ownPubKey
   curSlot <- currentSlot
@@ -253,7 +247,7 @@ bid (params, b) = do
       -- - In best case: Overall
       -- - If parallel bids are done, it's should be at least the highest of the current thread
       -- - Or not valid at all
-      outputBid = Ongoing ownBid
+      outputBid = Bidding ownBid
       validTo = Interval.to $ succ curSlot
   logI' "Placing bid" [("pk", show ownPk), ("bid", show b)]
   -- Verify current state
@@ -313,7 +307,7 @@ bid (params, b) = do
   pure ()
 
 
-close :: ParallelAuctionParams -> Contract w ParallelAuctionSchema ParallelAuctionError ()
+close :: ParallelAuctionParams -> ParallelAuctionContract ()
 close params = do
   curSlot <- currentSlot
   let scrInst = inst params
@@ -375,6 +369,19 @@ close params = do
               <> mustPayToPubKey pkh (Ada.toValue b)
 
 -- Helper
+createBiddingThreads ::
+  PubKeyHash ->
+  Integer ->
+  ParallelAuctionContract [Value]
+createBiddingThreads pkHash threadCount = do
+  c <- Currency.forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
+  pure . toSingleValues . Currency.forgedValue $ c
+
+toSingleValues :: Value -> [Value]
+toSingleValues v = do
+  (s, tn, amt) <- Value.flattenValue v
+  replicate (fromIntegral amt) $ Value.singleton s tn 1
+
 findMaxUTxORef :: UtxoMap -> Maybe (TxOutRef, [TxOutRef])
 findMaxUTxORef utxoMap = do
   let bids :: Maybe (TxOutRef, TxOutTx, [TxOutRef]) = Haskell.foldl step Nothing (Map.toList utxoMap)
@@ -412,7 +419,7 @@ safeMax [] = Nothing
 safeMax bs = Just $ maximum bs
 
 -- Logging Helper
-printUTxODatums :: ParallelAuctionParams -> Contract w ParallelAuctionSchema ParallelAuctionError ()
+printUTxODatums :: ParallelAuctionParams -> ParallelAuctionContract ()
 printUTxODatums params = do
   utxoMap <- utxoAt $ scrAddress params
   logI'' "UTxO count" "count" $ show (Map.size utxoMap)
@@ -433,7 +440,7 @@ logI' :: Haskell.String -> [(Haskell.String, Haskell.String)] -> Contract w s e 
 logI' t m = logInfo @Haskell.String $ t <> printKeyValues m
   where
     printKeyValues [] = ""
-    printKeyValues m = ": " <> mconcat (fmap kvToString m)
+    printKeyValues m' = ": " <> mconcat (fmap kvToString m')
     kvToString (k, v) = k <> "=" <> show v
 
 logI'' :: Haskell.String -> Haskell.String -> Haskell.String -> Contract w s e ()
