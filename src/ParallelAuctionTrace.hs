@@ -20,6 +20,21 @@ import Data.Default
 test :: IO ()
 test = runEmulatorTraceIO' def emulatorConfig testTrace
 
+testBidding :: IO ()
+testBidding = runEmulatorTraceIO' def emulatorConfig $ do
+  h1 <- activateContractWallet w1 endpoints
+  h2 <- activateContractWallet w2 endpoints
+  Extras.logInfo @String $ "Wallet 1 starts auction"
+  callEndpoint @"start" h1 theAuction
+  void $ waitUntilSlot 5
+  Extras.logInfo @String $ "Wallet 2 bids"
+  callEndpoint @"bid" h2 (theAuction, 400)
+  s <- waitNSlots 10
+  -- FIXME Close with any wallet
+  callEndpoint @"close" h1 theAuction
+  Extras.logInfo $ "END" ++ show s
+
+
 w1, w2, w3 :: Wallet
 w1 = Wallet 1
 w2 = Wallet 2
@@ -60,9 +75,11 @@ testTrace = do
   callEndpoint @"start" h1 theAuction
   void $ waitUntilSlot 5
   Extras.logInfo @String $ "w2 is bidding"
-  callEndpoint @"bid" h2 (theAuction, 40)
-  -- callEndpoint @"bid" h3 (theAuction, 10)
-  -- -- callEndpoint @"bid" h3 10
-  -- void $ waitUntilSlot 5
+  callEndpoint @"bid" h2 (theAuction, 400)
+  callEndpoint @"bid" h3 (theAuction, 100)
+  -- callEndpoint @"bid" h3 (theAuction, 300)
+  void $ waitUntilSlot 5
   s <- waitNSlots 1
+  -- FIXME Close with any wallet
+  callEndpoint @"close" h1 theAuction
   Extras.logInfo $ "END" ++ show s
