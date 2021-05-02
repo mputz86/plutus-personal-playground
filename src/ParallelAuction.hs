@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -19,7 +20,8 @@ import Control.Lens
 import Control.Monad hiding (fmap)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Hashable (hash)
-import Data.Map as Map
+import qualified Data.Map as Map
+import qualified Data.List as List
 import Data.Text (Text, pack)
 import Data.Void (Void)
 import GHC.Generics (Generic)
@@ -39,6 +41,7 @@ import qualified Plutus.V1.Ledger.Interval as Interval
 import qualified Plutus.V1.Ledger.Scripts (unitDatum, unitRedeemer)
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
+import PlutusTx.AssocMap as PlutusTxMap
 import PlutusTx.Builtins
 import PlutusTx.Prelude hiding (Semigroup (..), unless)
 import qualified PlutusTx.Prelude as PlutusTx
@@ -69,17 +72,23 @@ data Bid = Bid
   deriving stock (Haskell.Eq, Haskell.Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- Compare bids by only looking at amount.
-compareBids :: Bid -> Bid -> Ordering
-compareBids (Bid b1 _) (Bid b2 _) = compare b1 b2
+-- Compare bids first by value, than by public key.
+instance Haskell.Ord Bid where
+  compare (Bid b1 pk1) (Bid b2 pk2) =
+    case compare b1 b2 of
+      EQ -> compare pk1 pk2
+      o -> o
 
 PlutusTx.unstableMakeIsData ''Bid
 
-newtype ParallelAuctionDatum = ParallelAuctionDatum
-  { dHighestBid :: Bid
-  -- FIXME: Required in here? Or just check that it is preserve.
-  -- , dThreadToken :: Maybe Value.AssetClass
-  }
+data ParallelAuctionDatum
+  = Ongoing
+      { dHighestBid :: Bid
+      -- FIXME: Required in here? Or just check that it is preserve.
+      -- , dThreadToken :: Maybe Value.AssetClass
+      }
+  | Hold
+  | Finished
   deriving stock (Haskell.Eq, Haskell.Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
@@ -91,6 +100,22 @@ PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
 {-# INLINEABLE mkValidator #-}
 mkValidator :: ParallelAuctionParams -> ParallelAuctionDatum -> ParallelAuctionInput -> ScriptContext -> Bool
+mkValidator params datum (InputBid bid) ctx@ScriptContext {scriptContextTxInfo = txInfo} =
+  traceIfFalse
+    "New bid is not higher"
+    (checkNewBidIsHigher' datum bid)
+    && traceIfFalse
+      "Auction is not open anymore"
+      (checkAuctionIsStillOpen params ctx)
+    && traceIfFalse
+      "Bid is not valid thread continuation"
+      (checkIsBiddingThread ctx)
+-- Ensure one input
+-- Ensure input contains correct token
+-- Only one output
+-- Output goes back to script
+-- Output contains token
+
 mkValidator params _ InputClose _ = True
 -- Check on transaction
 -- - Must contain all (and only) inputs with thread token
@@ -106,23 +131,7 @@ mkValidator params _ InputClose _ = True
 -- Datums of all inputs must be used to compute highest bidder
 -- Highest bidder must get asset token
 -- Money must be transfered to original owner
--- Money of not-higheset bidders must be returned
-mkValidator params datum (InputBid bid) ctx@ScriptContext {scriptContextTxInfo = txInfo} =
-  traceIfFalse
-    "New bid is not higher"
-    (checkNewBidIsHigher' datum bid)
-    && traceIfFalse
-      "Auction is not open anymore"
-      (checkAuctionIsStillOpen params ctx)
-    && traceIfFalse
-      "Bid is not valid thread continuation"
-      (checkIsBiddingThread ctx)
-
--- Ensure one input
--- Ensure input contains correct token
--- Only one output
--- Output goes back to script
--- Output contains token
+-- Money of not-highset bidders must be returned
 
 checkNewBidIsHigher :: Bid -> Bid -> Bool
 checkNewBidIsHigher (Bid curBid _) (Bid newBid _) = curBid < newBid
@@ -207,21 +216,22 @@ start params = do
       scrInst = inst params
   -- Forge tokens for auction threads
   c :: Currency.OneShotCurrency <-
-    Currency.forgeContract (pubKeyHash ownPk) [("auction-theads", fromIntegral $ pThreadCount params)]
+    Currency.forgeContract (pubKeyHash ownPk) [("auction-threads", fromIntegral $ pThreadCount params)]
   let cV = Currency.forgedValue c
       -- Create one UTxO for every single value
       cVs = splitToSingleValues cV
       txConstrs = createConstraintsForValues ownPkHash cVs
-  logInfo @Haskell.String $ "submit for tx confirmation"
+        <> mustPayToTheScript Hold (pAsset params)
+  logI "submit for tx confirmation"
   -- Submit tx
   ledgerTx <- submitTxConstraints scrInst txConstrs
-  logInfo @Haskell.String $ printf "wait for tx confirmation"
+  logI "wait for tx confirmation"
   void . awaitTxConfirmed . txId $ ledgerTx
   -- Verify current state
   printUTxODatums params
   where
     createConstraintForValue :: PubKeyHash -> Value -> TxConstraints ParallelAuctionInput ParallelAuctionDatum
-    createConstraintForValue self = mustPayToTheScript (ParallelAuctionDatum $ Bid 0 self)
+    createConstraintForValue self = mustPayToTheScript (Ongoing $ Bid 0 self)
     createConstraintsForValues :: PubKeyHash -> [Value] -> TxConstraints ParallelAuctionInput ParallelAuctionDatum
     createConstraintsForValues self = mconcat . fmap (createConstraintForValue self)
 
@@ -243,7 +253,7 @@ bid (params, b) = do
       -- - In best case: Overall
       -- - If parallel bids are done, it's should be at least the highest of the current thread
       -- - Or not valid at all
-      outputBid = ParallelAuctionDatum ownBid
+      outputBid = Ongoing ownBid
       validTo = Interval.to $ succ curSlot
   logI' "Placing bid" [("pk", show ownPk), ("bid", show b)]
   -- Verify current state
@@ -259,7 +269,7 @@ bid (params, b) = do
       utxoIndex :: Int = hash pkHash `mod` fromIntegral (pThreadCount params)
       -- Ensure utxoMap has the same amount as `threadCount`
       -- FIXME: Replace with lens getter
-      (utxoToBidRef, TxOutTx _ (TxOut _ threadToken _)) = utxoIndex `elemAt` utxoMap
+      (utxoToBidRef, TxOutTx _ (TxOut _ threadToken _)) = utxoIndex `Map.elemAt` utxoMap
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
   let lookups =
@@ -267,9 +277,19 @@ bid (params, b) = do
           <> Constraints.scriptInstanceLookups scrInst
       -- Built constraints on our own
       constrs = [MustValidateIn validTo]
-      inputConstraints = [InputConstraint {icRedeemer = inputBid, icTxOutRef = utxoToBidRef}]
+      inputConstraints =
+        [ InputConstraint
+            { icRedeemer = inputBid,
+              icTxOutRef = utxoToBidRef
+            }
+        ]
       -- FIXME: Datum should be the updated one from the existing tx
-      outputConstraints = [OutputConstraint {ocDatum = outputBid, ocValue = threadToken <> Ada.toValue (bBid ownBid)}]
+      outputConstraints =
+        [ OutputConstraint
+            { ocDatum = outputBid,
+              ocValue = threadToken <> Ada.toValue (bBid ownBid)
+            }
+        ]
       txConstrs =
         TxConstraints
           { txConstraints = constrs,
@@ -292,14 +312,86 @@ bid (params, b) = do
   -- Use this UTxO to do the bidding
   pure ()
 
+
 close :: ParallelAuctionParams -> Contract w ParallelAuctionSchema ParallelAuctionError ()
 close params = do
+  curSlot <- currentSlot
+  let scrInst = inst params
+      scr = validator params
+      validFrom = Interval.from $ curSlot
   logI "Closing auction"
+  -- FIXME: Only UTxOs with correct asset
   utxoMap <- utxoAt (scrAddress params)
   printUTxODatums params
+  case findMaxUTxORef utxoMap of
+    Just (winningUtxoRef, otherUtxoRefs) -> do
+      logI "Paying back"
+      let Just winningTxOut = Map.lookup winningUtxoRef utxoMap
+          Just highestBid = txOutToBid winningTxOut
+          winningTxOutValue = txOutTxOut winningTxOut ^. outValue
+          -- FIXME: May fail if multiple thread tokens / non-Ada tokens are found
+          [threadTokenSymbol] = List.filter (/= adaSymbol) $ Value.symbols winningTxOutValue
+          Just winningTxOutThreadTokenValue = PlutusTxMap.lookup threadTokenSymbol $ Value.getValue winningTxOutValue
+          winningTxOutThreadToken = negate . Value.Value $ singleton threadTokenSymbol winningTxOutThreadTokenValue
+          winningTxOutThreadTokenAll = negate . Value.Value $ singleton threadTokenSymbol (fmap (\_ -> pThreadCount params) winningTxOutThreadTokenValue)
+      logI'' "Highest bid" "" $ show winningTxOut
+      logI'' "Thread token" "" $ show winningTxOutThreadToken
+      let lookups =
+            Constraints.unspentOutputs utxoMap
+              <> Constraints.scriptInstanceLookups scrInst
+              <> Constraints.otherScript scr
+      let payBacks = mconcat $ payBackBid utxoMap <$> otherUtxoRefs
+          payOwner =
+              mustSpendScriptOutput winningUtxoRef closeRedeemer
+              <> mustPayToPubKey (pOwner params) (Ada.toValue $ bBid highestBid)
+          -- transferAsset = mempty
+          -- FIXME Thread tokens are not destroyed but kept in script. How to burn/destroy?
+          burnThreadTokens =
+              mustPayToTheScript Finished winningTxOutThreadTokenAll
+          txConstrs =
+            payBacks
+              <> payOwner
+              <> burnThreadTokens
+      -- Submit tx
+      ledgerTx <- submitTxConstraintsWith lookups txConstrs
+      logI "Waiting for tx confirmation"
+      void . awaitTxConfirmed . txId $ ledgerTx
+
+      -- Print UTxO
+      logI "Printing for tx confirmation"
+      printUTxODatums params
+
+      pure ()
+    Nothing -> do
+      logI "Failed to find highest bid"
   pure ()
+  where
+    closeRedeemer = Redeemer $ PlutusTx.toData InputClose
+    payBackBid utxoMap utxoRef =
+        -- FIXME Unsafe
+        let Just out = Map.lookup utxoRef utxoMap
+            Just (Bid b pkh) = txOutToBid out
+         in mustSpendScriptOutput utxoRef closeRedeemer
+              <> mustPayToPubKey pkh (Ada.toValue b)
 
 -- Helper
+findMaxUTxORef :: UtxoMap -> Maybe (TxOutRef, [TxOutRef])
+findMaxUTxORef utxoMap = do
+  let bids :: Maybe (TxOutRef, TxOutTx, [TxOutRef]) = Haskell.foldl step Nothing (Map.toList utxoMap)
+   in (\(a, _, b) -> (a, b)) <$> bids
+  where
+    step Nothing (ref, out) = Just (ref, out, [])
+    step (Just (aref, aout, arefs)) (ref, out) =
+        case Haskell.compare (txOutToBid out) (txOutToBid aout) of
+          GT -> Just (ref, out, aref : arefs)
+          _ -> Just (aref, aout, ref : arefs)
+
+txOutToBid :: TxOutTx -> Maybe Bid
+txOutToBid o = txOutTxDatum o >>= datumToBid
+
+datumToBid :: Datum -> Maybe Bid
+datumToBid (Datum d) = dHighestBid <$> PlutusTx.fromData @ParallelAuctionDatum d
+
 highestBidInUTxOs :: UtxoMap -> Maybe Bid
 highestBidInUTxOs utxoMap = do
   maximumByOf
@@ -309,16 +401,21 @@ highestBidInUTxOs utxoMap = do
         . Control.Lens.to datumToHighestBid
         . _Just
     )
-    compareBids
+    Haskell.compare
     utxoMap
   where
     datumToHighestBid (Datum d) = dHighestBid <$> PlutusTx.fromData @ParallelAuctionDatum d
+
+-- General Helper
+safeMax :: Haskell.Ord a => [a] -> Maybe a
+safeMax [] = Nothing
+safeMax bs = Just $ maximum bs
 
 -- Logging Helper
 printUTxODatums :: ParallelAuctionParams -> Contract w ParallelAuctionSchema ParallelAuctionError ()
 printUTxODatums params = do
   utxoMap <- utxoAt $ scrAddress params
-  logI'' "UTxO count" "count" $ show (size utxoMap)
+  logI'' "UTxO count" "count" $ show (Map.size utxoMap)
   let datums :: [ParallelAuctionDatum] =
         utxoMap
           ^.. folded
@@ -345,4 +442,4 @@ logI'' t k v = logI' t [(k, v)]
 logUTxOSize :: Maybe Haskell.String -> UtxoMap -> Contract w s e ()
 logUTxOSize title utxoMap =
   let t = fromMaybe "UTxO size of script" title
-   in logI'' t "size" $ show (size utxoMap)
+   in logI'' t "size" $ show (Map.size utxoMap)
