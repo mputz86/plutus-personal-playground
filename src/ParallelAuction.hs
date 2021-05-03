@@ -23,71 +23,62 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Hashable (hash)
 import qualified Data.List as List
 import qualified Data.Map as Map
-import Data.Text (Text, pack)
-import Data.Void (Void)
 import GHC.Generics (Generic)
 import Ledger hiding (singleton)
 import Ledger.Ada as Ada
 import Ledger.AddressMap (UtxoMap)
 import Ledger.Constraints as Constraints
-import qualified Ledger.Constraints.OffChain as Constraints
-import Ledger.Constraints.TxConstraints (InputConstraint (..), OutputConstraint (..))
 import qualified Ledger.Typed.Scripts as Scripts
-import qualified Ledger.Typed.Tx as Typed
-import Playground.Contract (ToSchema)
 import Plutus.Contract
-    ( ContractError,
-      AsContractError(_ContractError),
-      Contract,
-      logInfo,
-      awaitTxConfirmed,
-      endpoint,
-      ownPubKey,
-      utxoAt,
-      submitTxConstraints,
-      submitTxConstraintsWith,
-      select,
-      type (.\/),
-      BlockchainActions,
-      Endpoint )
+  ( AsContractError (_ContractError),
+    BlockchainActions,
+    Contract,
+    ContractError,
+    Endpoint,
+    awaitTxConfirmed,
+    endpoint,
+    logInfo,
+    ownPubKey,
+    select,
+    submitTxConstraints,
+    submitTxConstraintsWith,
+    utxoAt,
+    type (.\/),
+  )
 import qualified Plutus.Contracts.Currency as Currency
-import qualified Plutus.V1.Ledger.Api as Api
 import qualified Plutus.V1.Ledger.Interval as Interval
-import qualified Plutus.V1.Ledger.Scripts (unitDatum, unitRedeemer)
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
-import PlutusTx.AssocMap as AssocMap ( lookup, singleton, delete )
+import PlutusTx.AssocMap as AssocMap (delete, lookup, singleton)
 import PlutusTx.Prelude
-    ( fromIntegral,
-      Enum(succ),
-      Integral(mod),
-      Show(show),
-      maximum,
-      Bool(..),
-      Int,
-      Integer,
-      Maybe(..),
-      Ordering(GT, EQ),
-      (.),
-      mapM_,
-      replicate,
-      Applicative(pure),
-      Functor(fmap),
-      Eq((==)),
-      Ord((<), compare),
-      AdditiveGroup((-)),
-      length,
-      id,
-      mconcat,
-      (<$>),
-      (&&),
-      (/=),
-      fromMaybe,
-      ($),
-      trace,
-      traceIfFalse )
-import qualified PlutusTx.Prelude as PlutusTx
-import Text.Printf (printf)
+  ( AdditiveGroup ((-)),
+    Applicative (pure),
+    Bool (..),
+    Eq ((==)),
+    Functor (fmap),
+    Int,
+    Integer,
+    Integral (mod),
+    Maybe (..),
+    Ord (compare, (<)),
+    Ordering (EQ, GT),
+    Show (show),
+    fromIntegral,
+    fromMaybe,
+    id,
+    length,
+    mapM_,
+    maximum,
+    mconcat,
+    replicate,
+    trace,
+    traceIfFalse,
+    ($),
+    (&&),
+    (.),
+    (/=),
+    (<$>),
+  )
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
 
@@ -177,16 +168,16 @@ data ParallelAuctionDatum
 PlutusTx.unstableMakeIsData ''ParallelAuctionDatum
 
 data ParallelAuctionInput
-    = InputBid Bid
-    | InputClose
+  = InputBid Bid
+  | InputClose
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
 {-# INLINEABLE closeRedeemer #-}
+
 -- | Untyped redeemer for 'InputClose' input.
 closeRedeemer :: Redeemer
 closeRedeemer = Redeemer $ PlutusTx.toData InputClose
-
 
 {-# INLINEABLE mustPayOwner #-}
 mustPayOwner :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
@@ -201,6 +192,7 @@ mustTransferAsset params holdUtxoRef highestBid =
     <> mustPayToPubKey (bBidder highestBid) (pAsset params)
 
 {-# INLINEABLE mustReturnThreadTokens #-}
+
 -- | Returns thread tokens back to script.
 --   FIXME Better to burn them?
 --   FIXME @Lars How to burn these tokens? Using Currency from use-cases.
@@ -213,11 +205,9 @@ mustUseThreadTokenAndPayBid utxoBidRef threadToken bid oldBid =
   let inputBid = InputBid bid
       outputBid = Bidding bid
       payToScript = threadToken <> Ada.toValue (bBid bid)
-      -- FIXME Broken: Paying back does not work: The new bidder pays to the old bidder.
-      --   So the value stored in the auction increases.
-   in mustPayToPubKey (bBidder oldBid) (Ada.toValue $ bBid oldBid) <>
-        mustPayToTheScript outputBid payToScript
-        <> mustSpendScriptOutput utxoBidRef (Redeemer $ PlutusTx.toData inputBid)
+   in mustSpendScriptOutput utxoBidRef (Redeemer $ PlutusTx.toData inputBid)
+        <> mustPayToPubKey (bBidder oldBid) (Ada.toValue $ bBid oldBid)
+        <> mustPayToTheScript outputBid payToScript
 
 {-# INLINEABLE validAfterDeadline #-}
 validAfterDeadline :: Slot -> TxConstraints i o
@@ -230,6 +220,7 @@ validBeforeDeadline deadline =
   mustValidateIn (Interval.to $ deadline - 1)
 
 {-# INLINEABLE checkConstraints #-}
+
 -- | Version of 'checkScriptContext' with fixed types for this contract.
 checkConstraints :: TxConstraints ParallelAuctionInput ParallelAuctionDatum -> ScriptContext -> Bool
 checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionDatum
@@ -242,16 +233,17 @@ checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionDatu
 -- - Output goes back to script
 -- - Output contains token
 validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
-validateNewBid params ctx@ScriptContext{scriptContextTxInfo=txInfo} curBid newBid =
+validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo} curBid newBid =
   traceIfFalse
     "New bid is not higher"
     (checkNewBidIsHigher curBid newBid)
     && traceIfFalse
       "Auction is not open anymore"
       (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
-    -- && traceIfFalse
-    --   "Bid is not valid thread continuation"
-    --   (checkIsBiddingThread ctx)
+
+-- && traceIfFalse
+--   "Bid is not valid thread continuation"
+--   (checkIsBiddingThread ctx)
 
 {-# INLINEABLE validateCloseBiddingThread #-}
 validateCloseBiddingThread :: ParallelAuctionParams -> ScriptContext -> Bid -> Bool
@@ -276,8 +268,8 @@ validateCloseAuction params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
 -- - Spends hold UTxO
 -- - Spends asset to highest bidder
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
-validateIsClosingTx params ctx@ScriptContext{scriptContextTxInfo=txInfo} =
-    True
+validateIsClosingTx params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
+  True
 
 {-# INLINEABLE mkValidator #-}
 mkValidator ::
@@ -290,16 +282,16 @@ mkValidator params state input ctx =
   case (state, input) of
     -- Transition within a bidding thread
     (Bidding curBid, InputBid newBid) ->
-        validateNewBid params ctx curBid newBid
+      validateNewBid params ctx curBid newBid
     -- Transition from bidding thread to closed auction
     (Bidding curBid, InputClose) ->
-        validateCloseBiddingThread params ctx curBid
+      validateCloseBiddingThread params ctx curBid
     -- Transition from auction state to closed auction
     (Hold, InputClose) ->
-        validateCloseAuction params ctx
+      validateCloseAuction params ctx
     -- Not allowed transitions
     (Finished, _) ->
-        trace "Invalid transition from state finished" False
+      trace "Invalid transition from state finished" False
     _ -> trace "Unknown transition" False
 
 -- Check on transaction
@@ -393,24 +385,22 @@ start params = do
   ownPk <- ownPubKey
   let ownPkHash = pubKeyHash ownPk
       scrInst = inst params
-  -- Create bidding threads
-  ts :: _ <- createBiddingThreads ownPkHash (pThreadCount params)
+  -- Create bidding threads (UTxOs)
+  ts <- createBiddingThreads ownPkHash (pThreadCount params)
   -- Create tx constraints
   let -- Constraint to pay one thread token to each thread with inital bidding state
       distributeThreadTokensToThreads =
-        mconcat $
-          fmap (mustPayToTheScript . Bidding $ Bid 0 ownPkHash) ts
+        mconcat $ fmap (mustPayToTheScript . Bidding $ Bid 0 ownPkHash) ts
       -- Constraint to pay offered asset to script, hold in script until auction closes
       payAssetFromOwnerToScript =
         mustPayToTheScript Hold (pAsset params)
+      constraints =
+        distributeThreadTokensToThreads
+          <> payAssetFromOwnerToScript
   logI "Starting auction"
-  ledgerTx <-
-    submitTxConstraints scrInst $
-      distributeThreadTokensToThreads
-        <> payAssetFromOwnerToScript
+  ledgerTx <- submitTxConstraints scrInst constraints
   void . awaitTxConfirmed . txId $ ledgerTx
-  logI "Started auction"
-  -- Verify current state
+  -- Debug: Verify current state
   printUTxODatums' params
 
 -- | TODO
@@ -432,9 +422,9 @@ bid (params, b) = do
       -- FIXME Unsafe operations, ensure threadUtxoMap has the same amount as `threadCount`
       (utxoBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
       threadToken =
-          let Value.Value x = txOutTxOut txOut ^. outValue
-              r = AssocMap.delete Ada.adaSymbol x
-           in Value.Value r
+        let Value.Value x = txOutTxOut txOut ^. outValue
+            r = AssocMap.delete Ada.adaSymbol x
+         in Value.Value r
       Just loosingBid = txOutToBid txOut
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
@@ -443,8 +433,8 @@ bid (params, b) = do
           <> Constraints.scriptInstanceLookups scrInst
           <> Constraints.otherScript scr
       constraints =
-          validBeforeDeadline (pEndTime params)
-            <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid loosingBid
+        validBeforeDeadline (pEndTime params)
+          <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid loosingBid
   logI'
     "Paying back"
     [ ("bid", show loosingBid),
@@ -491,11 +481,11 @@ close params = do
               <> Constraints.otherScript scr
           payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
           constraints =
-              validAfterDeadline (pEndTime params)
-                <> payBacks
-                <> mustPayOwner params winningUtxoRef highestBid
-                <> mustTransferAsset params holdUtxoRef highestBid
-                <> mustReturnThreadTokens threadTokenValueAll
+            validAfterDeadline (pEndTime params)
+              <> payBacks
+              <> mustPayOwner params winningUtxoRef highestBid
+              <> mustTransferAsset params holdUtxoRef highestBid
+              <> mustReturnThreadTokens threadTokenValueAll
       -- Submit tx
       ledgerTx <- submitTxConstraintsWith lookups constraints
       logI "Waiting for tx confirmation"
