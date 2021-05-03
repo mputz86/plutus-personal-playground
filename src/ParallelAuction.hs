@@ -173,13 +173,37 @@ PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 closeRedeemer :: Redeemer
 closeRedeemer = Redeemer $ PlutusTx.toData InputClose
 
-mustUseThreadTokenAndPayBid :: TxOutRef -> Value -> Bid -> TxConstraints i ParallelAuctionDatum
-mustUseThreadTokenAndPayBid utxoBidRef threadToken bid =
+
+{-# INLINEABLE mustPayOwner #-}
+mustPayOwner :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
+mustPayOwner params winningUtxoRef highestBid =
+  mustSpendScriptOutput winningUtxoRef (Redeemer $ PlutusTx.toData InputClose)
+    <> mustPayToPubKey (pOwner params) (Ada.toValue $ bBid highestBid)
+
+{-# INLINEABLE mustTransferAsset #-}
+mustTransferAsset :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
+mustTransferAsset params holdUtxoRef highestBid =
+  mustSpendScriptOutput holdUtxoRef closeRedeemer
+    <> mustPayToPubKey (bBidder highestBid) (pAsset params)
+
+{-# INLINEABLE mustReturnThreadTokens #-}
+-- | Returns thread tokens back to script.
+--   FIXME Better to burn them?
+--   FIXME @Lars How to burn these tokens? Using Currency from use-cases.
+mustReturnThreadTokens :: Value -> TxConstraints i ParallelAuctionDatum
+mustReturnThreadTokens = mustPayToTheScript Finished
+
+{-# INLINEABLE mustUseThreadTokenAndPayBid #-}
+mustUseThreadTokenAndPayBid :: TxOutRef -> Value -> Bid -> Bid -> TxConstraints i ParallelAuctionDatum
+mustUseThreadTokenAndPayBid utxoBidRef threadToken bid oldBid =
   let inputBid = InputBid bid
       outputBid = Bidding bid
       payToScript = threadToken <> Ada.toValue (bBid bid)
-   in mustSpendScriptOutput utxoBidRef (Redeemer $ PlutusTx.toData inputBid)
-        <> mustPayToTheScript outputBid payToScript
+      -- FIXME Broken: Paying back does not work: The new bidder pays to the old bidder.
+      --   So the value stored in the auction increases.
+   in mustPayToPubKey (bBidder oldBid) (Ada.toValue $ bBid oldBid) <>
+        mustPayToTheScript outputBid payToScript
+        <> mustSpendScriptOutput utxoBidRef (Redeemer $ PlutusTx.toData inputBid)
 
 {-# INLINEABLE validAfterDeadline #-}
 validAfterDeadline :: Slot -> TxConstraints i o
@@ -211,9 +235,9 @@ validateNewBid params ctx@ScriptContext{scriptContextTxInfo=txInfo} curBid newBi
     && traceIfFalse
       "Auction is not open anymore"
       (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
-    && traceIfFalse
-      "Bid is not valid thread continuation"
-      (checkIsBiddingThread ctx)
+    -- && traceIfFalse
+    --   "Bid is not valid thread continuation"
+    --   (checkIsBiddingThread ctx)
 
 {-# INLINEABLE validateCloseBiddingThread #-}
 validateCloseBiddingThread :: ParallelAuctionParams -> ScriptContext -> Bid -> Bool
@@ -373,8 +397,9 @@ start params = do
   void . awaitTxConfirmed . txId $ ledgerTx
   logI "Started auction"
   -- Verify current state
-  printUTxODatums params
+  printUTxODatums' params
 
+-- | TODO
 bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
 bid (params, b) = do
   ownPk <- ownPubKey
@@ -388,46 +413,47 @@ bid (params, b) = do
   let highestBid = highestBidInUTxOs threadUtxoMap
   logI'' "Checking if bidding highest for all UTxOs" "highest bid" (show highestBid)
   -- TODO Add check against highest bid of all currently known UTxOs
-  -- Only bid if own bid is higher than highest
   -- Select an UTxOs by using public key hash and thread count
   let utxoIndex :: Int = hash ownPkHash `mod` fromIntegral (pThreadCount params)
       -- FIXME Unsafe operations, ensure threadUtxoMap has the same amount as `threadCount`
       (utxoBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
       threadToken = txOutTxOut txOut ^. outValue
+      Just loosingBid = txOutToBid txOut
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups scrInst
           <> Constraints.otherScript scr
+      constraints =
+          validBeforeDeadline (pEndTime params)
+            <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid loosingBid
+  logI'
+    "Paying back"
+    [ ("bid", show loosingBid),
+      ("own bid", show ownBid),
+      ("thread token", show threadToken),
+      ("unbalanced tx", show $ mkTx lookups constraints)
+    ]
   ledgerTx <-
-    submitTxConstraintsWith lookups $
-      validBeforeDeadline (pEndTime params)
-        <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
+    submitTxConstraintsWith lookups constraints
   logI "Waiting for tx confirmation"
   void . awaitTxConfirmed . txId $ ledgerTx
 
   -- Print UTxO
   logI "Printing for tx confirmation"
-  printUTxODatums params
+  printUTxODatums' params
   pure ()
-
-{-# INLINEABLE mustPayOwner #-}
-mustPayOwner :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
-mustPayOwner params winningUtxoRef highestBid =
-  mustSpendScriptOutput winningUtxoRef (Redeemer $ PlutusTx.toData InputClose)
-    <> mustPayToPubKey (pOwner params) (Ada.toValue $ bBid highestBid)
 
 close :: ParallelAuctionParams -> ParallelAuctionContract ()
 close params = do
-  curSlot <- currentSlot
   let scrInst = inst params
       scr = validator params
   logI "Closing auction"
   utxoMap <- utxoAt (scrAddress params)
   -- Filter for utxo with bidding state
   let threadUtxoMap = filterBiddingUTxOs utxoMap
-  printUTxODatums params
+  printUTxODatums' params
   case findMaxUTxORef threadUtxoMap of
     Just (winningUtxoRef, otherUtxoRefs) -> do
       logI "Paying back"
@@ -447,27 +473,20 @@ close params = do
               <> Constraints.scriptInstanceLookups scrInst
               <> Constraints.otherScript scr
           payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
-          transferAsset =
-            mustSpendScriptOutput holdUtxoRef closeRedeemer
-              <> mustPayToPubKey (bBidder highestBid) (pAsset params)
-          -- FIXME Thread tokens are not destroyed but kept in script. How to burn/destroy?
-          burnThreadTokens =
-            mustPayToTheScript Finished threadTokenValueAll
+          constraints =
+              validAfterDeadline (pEndTime params)
+                <> payBacks
+                <> mustPayOwner params winningUtxoRef highestBid
+                <> mustTransferAsset params holdUtxoRef highestBid
+                <> mustReturnThreadTokens threadTokenValueAll
       -- Submit tx
-      ledgerTx <-
-        submitTxConstraintsWith lookups $
-          validAfterDeadline (pEndTime params)
-            <> payBacks
-            <> mustPayOwner params winningUtxoRef highestBid
-            <> transferAsset
-            <> burnThreadTokens
-
+      ledgerTx <- submitTxConstraintsWith lookups constraints
       logI "Waiting for tx confirmation"
       void . awaitTxConfirmed . txId $ ledgerTx
 
       -- Print UTxO
       logI "Printing for tx confirmation"
-      printUTxODatums params
+      printUTxODatums' params
 
       pure ()
     Nothing -> do
@@ -570,9 +589,12 @@ safeMax [] = Nothing
 safeMax bs = Just $ maximum bs
 
 -- Logging Helper
-printUTxODatums :: ParallelAuctionParams -> ParallelAuctionContract ()
-printUTxODatums params = do
-  utxoMap <- utxoAt $ scrAddress params
+printUTxODatums' :: ParallelAuctionParams -> ParallelAuctionContract ()
+printUTxODatums' = printUTxODatums . scrAddress
+
+printUTxODatums :: Ledger.Address -> ParallelAuctionContract ()
+printUTxODatums scrAddr = do
+  utxoMap <- utxoAt $ scrAddr
   logI'' "UTxO count" "count" $ show (Map.size utxoMap)
   let datums :: [(Value, ParallelAuctionDatum)] =
         utxoMap

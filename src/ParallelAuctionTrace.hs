@@ -17,32 +17,37 @@ import qualified Ledger.Value                       as Value
 import Data.Default
 
 
-test :: IO ()
-test = runEmulatorTraceIO' def emulatorConfig testTrace
+test :: EmulatorTrace () -> IO ()
+test = runEmulatorTraceIO' def emulatorConfig
 
-testBidding :: IO ()
-testBidding = runEmulatorTraceIO' def emulatorConfig $ do
+testX :: IO ()
+testX = runEmulatorTraceIO' def emulatorConfig testTraceParallelBid
+
+testSimpleBidding :: IO ()
+testSimpleBidding = runEmulatorTraceIO' def emulatorConfig $ do
+  let auction = theAuction
   h1 <- activateContractWallet w1 endpoints
   h2 <- activateContractWallet w2 endpoints
   -- Starting
   Extras.logInfo @String $ "Wallet 1 starts auction"
-  callEndpoint @"start" h1 theAuction
+  callEndpoint @"start" h1 auction
   -- Bidding
   void $ waitUntilSlot 5
   Extras.logInfo @String $ "Wallet 2 bids"
-  callEndpoint @"bid" h2 (theAuction, 400)
+  callEndpoint @"bid" h2 (auction, 400)
   -- Closing
-  void $ waitUntilSlot (pEndTime theAuction)
+  void $ waitUntilSlot (pEndTime auction)
   -- FIXME Close with any wallet
-  callEndpoint @"close" h1 theAuction
+  callEndpoint @"close" h1 auction
   s <- waitNSlots 1
   Extras.logInfo $ "Exit" ++ show s
 
 
-w1, w2, w3 :: Wallet
+w1, w2, w3, w4 :: Wallet
 w1 = Wallet 1
 w2 = Wallet 2
 w3 = Wallet 3
+w4 = Wallet 4
 
 walletPubKeyHash :: Wallet -> PubKeyHash
 walletPubKeyHash = pubKeyHash . walletPubKey
@@ -70,23 +75,47 @@ emulatorConfig =
 -- Tests
 -- - What if contract started twice with same config, i.e. same validator
 
-testTrace :: EmulatorTrace ()
-testTrace = do
+testTraceParallelBid :: EmulatorTrace ()
+testTraceParallelBid = do
+  let auction = theAuction
   h1 <- activateContractWallet w1 endpoints
   h2 <- activateContractWallet w2 endpoints
   h3 <- activateContractWallet w3 endpoints
   -- Starting
   Extras.logInfo @String $ "w1 starts"
-  callEndpoint @"start" h1 theAuction
+  callEndpoint @"start" h1 auction
   -- Bidding
   void $ waitUntilSlot 5
-  Extras.logInfo @String $ "w2 is bidding"
-  callEndpoint @"bid" h2 (theAuction, 400)
-  callEndpoint @"bid" h3 (theAuction, 100)
-  -- callEndpoint @"bid" h3 (theAuction, 300)
+  Extras.logInfo @String $ "Wallet 2 is bidding"
+  callEndpoint @"bid" h2 (auction, 400)
+  Extras.logInfo @String $ "Wallet 3 is bidding"
+  callEndpoint @"bid" h3 (auction, 100)
   -- Closing
-  s <- waitUntilSlot (pEndTime theAuction)
+  s <- waitUntilSlot (pEndTime auction)
   -- FIXME Close with any wallet
-  callEndpoint @"close" h1 theAuction
+  callEndpoint @"close" h1 auction
+  void $ waitNSlots 1
+  Extras.logInfo $ "Exit" ++ show s
+
+testTraceSequentialBid :: EmulatorTrace ()
+testTraceSequentialBid = do
+  let auction = theAuction{pThreadCount = 1}
+  h1 <- activateContractWallet w1 endpoints
+  h2 <- activateContractWallet w2 endpoints
+  h3 <- activateContractWallet w3 endpoints
+  -- Starting
+  Extras.logInfo @String $ "w1 starts"
+  callEndpoint @"start" h1 auction
+  -- Bidding
+  void $ waitUntilSlot 5
+  Extras.logInfo @String $ "Wallet 2 is bidding"
+  callEndpoint @"bid" h2 (auction, 400)
+  void $ waitNSlots 1
+  Extras.logInfo @String $ "Wallet 3 is bidding"
+  callEndpoint @"bid" h3 (auction, 500)
+  -- Closing
+  s <- waitUntilSlot (pEndTime auction)
+  -- FIXME Close with any wallet
+  --callEndpoint @"close" h1 auction
   void $ waitNSlots 1
   Extras.logInfo $ "Exit" ++ show s
