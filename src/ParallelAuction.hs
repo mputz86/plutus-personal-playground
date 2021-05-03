@@ -35,14 +35,28 @@ import Ledger.Constraints.TxConstraints (InputConstraint (..), OutputConstraint 
 import qualified Ledger.Typed.Scripts as Scripts
 import qualified Ledger.Typed.Tx as Typed
 import Playground.Contract (ToSchema)
-import Plutus.Contract hiding (when)
+import Plutus.Contract
+    ( ContractError,
+      AsContractError(_ContractError),
+      Contract,
+      logInfo,
+      awaitTxConfirmed,
+      endpoint,
+      ownPubKey,
+      utxoAt,
+      submitTxConstraints,
+      submitTxConstraintsWith,
+      select,
+      type (.\/),
+      BlockchainActions,
+      Endpoint )
 import qualified Plutus.Contracts.Currency as Currency
 import qualified Plutus.V1.Ledger.Api as Api
 import qualified Plutus.V1.Ledger.Interval as Interval
 import qualified Plutus.V1.Ledger.Scripts (unitDatum, unitRedeemer)
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
-import PlutusTx.AssocMap as PlutusTxMap ( lookup, singleton )
+import PlutusTx.AssocMap as AssocMap ( lookup, singleton, delete )
 import PlutusTx.Prelude
     ( fromIntegral,
       Enum(succ),
@@ -417,7 +431,10 @@ bid (params, b) = do
   let utxoIndex :: Int = hash ownPkHash `mod` fromIntegral (pThreadCount params)
       -- FIXME Unsafe operations, ensure threadUtxoMap has the same amount as `threadCount`
       (utxoBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
-      threadToken = txOutTxOut txOut ^. outValue
+      threadToken =
+          let Value.Value x = txOutTxOut txOut ^. outValue
+              r = AssocMap.delete Ada.adaSymbol x
+           in Value.Value r
       Just loosingBid = txOutToBid txOut
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
@@ -462,7 +479,7 @@ close params = do
           winningTxOutValue = txOutTxOut winningTxOut ^. outValue
           -- FIXME: May fail if multiple thread tokens / non-Ada tokens are found
           [threadTokenSymbol] = List.filter (/= adaSymbol) $ Value.symbols winningTxOutValue
-          Just threadTokenValue = PlutusTxMap.lookup threadTokenSymbol $ Value.getValue winningTxOutValue
+          Just threadTokenValue = AssocMap.lookup threadTokenSymbol $ Value.getValue winningTxOutValue
           threadTokenValueAll = Value.Value $ singleton threadTokenSymbol (fmap (\_ -> pThreadCount params) threadTokenValue)
 
           [holdUtxoRef] = Map.keys $ filterHoldUTxOs utxoMap
