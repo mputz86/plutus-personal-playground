@@ -332,12 +332,14 @@ bid (params, b) = do
   curSlot <- currentSlot
   let ownPkHash = pubKeyHash ownPk
       scrInst = inst params
+      scr = validator params
       ownBid = Bid (Ada.Lovelace b) ownPkHash
       inputBid = InputBid ownBid
       outputBid = Bidding ownBid
       validTo = Interval.to $ succ curSlot
   logI' "Trying to place bid" [("pk", show ownPk), ("bid", show b)]
-  threadUtxoMap <- filterBiddingUTxOs <$> utxoAt (scrAddress params)
+  utxoMap <- utxoAt (scrAddress params)
+  let threadUtxoMap = filterBiddingUTxOs utxoMap
   let highestBid = highestBidInUTxOs threadUtxoMap
   logI'' "Checking if bidding highest for all UTxOs" "highest bid" (show highestBid)
   -- TODO Add check against highest bid of all currently known UTxOs
@@ -350,36 +352,22 @@ bid (params, b) = do
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
   let lookups =
-        Constraints.unspentOutputs threadUtxoMap
+        Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups scrInst
+           <> Constraints.otherScript scr
       -- Built constraints on our own
       allowOnlyBeforeDeadline =
         mustValidateIn validTo
       -- FIXME: Datum should be the updated one from the existing tx
       -- FIXME: Use constraint creation methods and combine instead of manyally creating
-      inputConstraints =
-        [ InputConstraint
-            { icRedeemer = inputBid,
-              icTxOutRef = utxoToBidRef
-            }
-        ]
-      outputConstraints =
-        [ OutputConstraint
-            { ocDatum = outputBid,
-              ocValue = threadToken <> Ada.toValue (bBid ownBid)
-            }
-        ]
-      txConstrs =
-        TxConstraints
-          { txConstraints = [],
-            txOwnInputs = inputConstraints,
-            txOwnOutputs = outputConstraints
-          }
+      mustUseThreadToken =
+          mustSpendScriptOutput utxoToBidRef (Redeemer $ PlutusTx.toData inputBid)
+          <> mustPayToTheScript outputBid (threadToken <> Ada.toValue (bBid ownBid))
   -- Submit tx
   ledgerTx <-
     submitTxConstraintsWith lookups $
       allowOnlyBeforeDeadline
-        <> txConstrs
+        <> mustUseThreadToken -- txConstrs
   logI "Waiting for tx confirmation"
   void . awaitTxConfirmed . txId $ ledgerTx
 
