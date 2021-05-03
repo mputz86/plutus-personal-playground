@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
@@ -29,6 +30,15 @@ import Ledger hiding (singleton)
 import Ledger.Ada as Ada
 import Ledger.AddressMap (UtxoMap)
 import Ledger.Constraints as Constraints
+    ( TxConstraints,
+      scriptInstanceLookups,
+      otherScript,
+      unspentOutputs,
+      checkScriptContext,
+      mustPayToPubKey,
+      mustPayToTheScript,
+      mustSpendScriptOutput,
+      mustValidateIn )
 import qualified Ledger.Typed.Scripts as Scripts
 import Plutus.Contract
   ( AsContractError (_ContractError),
@@ -403,13 +413,17 @@ start params = do
   -- Debug
   printUtxos' params
 
--- | Selects any of the existing thread UTxOs. For placing own bid by spending this UTxO.
+-- | Selects any of the existing thread UTxO for placing own bid by spending this UTxO.
 selectUtxoIndex :: PubKeyHash -> Integer -> Int
 selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
 
 -- | Assuming thread token
 extractThreadToken :: Value -> Value
 extractThreadToken (Value.Value x) = Value.Value $ AssocMap.delete Ada.adaSymbol x
+
+hasCorrectUtxoCount :: Integer -> Int -> Bool
+hasCorrectUtxoCount threadCount utxoCount =
+   fromIntegral threadCount Haskell.== utxoCount
 
 bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
 bid (params, b) = do
@@ -421,33 +435,42 @@ bid (params, b) = do
   logI' "Trying to place bid" [("pk hash", show ownPkHash), ("bid", show b)]
   utxoMap <- utxoAt scrAddr
   let threadUtxoMap = filterBiddingUTxOs utxoMap
-      highestBidMaybe = highestBidInUTxOs threadUtxoMap
-  case highestBidMaybe of
-    Just highestBid | highestBid Haskell.< ownBid -> do
-      let utxoIndex = selectUtxoIndex ownPkHash (pThreadCount params)
-          -- FIXME Unsafe, but fine, assuming to have as many threads as UTxOs
-          (utxoBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
-          threadToken = extractThreadToken $ txOutTxOut txOut ^. outValue
-          -- Note: This is not necessarily the (computed) highest bid. It is the bid on the
-          --   current thread.
-          Just oldThreadBid = txOutTxToBid txOut
-      logI'
-        "Placing bid"
-        [ ("UTxO index", show utxoIndex),
-          ("highest bid", show highestBid)
-        ]
-      let lookups =
-            Constraints.unspentOutputs utxoMap
-              <> Constraints.scriptInstanceLookups scrInst
-              <> Constraints.otherScript scr
-          constraints =
-            validBeforeDeadline (pEndTime params)
-              <> mustPayBackBid oldThreadBid
-              <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
-      -- Submit tx
-      ledgerTx <- submitTxConstraintsWith lookups constraints
-      void . awaitTxConfirmed . txId $ ledgerTx
-    _ -> throwError . CheckError $ "Failed to find highest bid"
+  -- Check if thread UTxOs and expected thread count match
+  failWithIfFalse
+    (CheckError $ toLogT "Failed since wrong thread UTxO count"
+        [("thread count", show $ pThreadCount params),
+        ("utxo count", show $ Map.size threadUtxoMap)])
+    (hasCorrectUtxoCount (pThreadCount params) (Map.size threadUtxoMap))
+  -- Get highest bid
+  highestBid <- case highestBidInUTxOs threadUtxoMap of
+    Nothing ->
+      throwError . CheckError $ "Failed to find highest bid"
+    Just highestBid
+      | highestBid Haskell.>= ownBid ->
+        throwError . CheckError $ "Failed since another bid is higher than own bid"
+    Just highestBid -> pure highestBid
+  let utxoIndex = selectUtxoIndex ownPkHash (pThreadCount params)
+      -- Note: Unsafe, but checked that threadUtxoMap is equal to thread count
+      (utxoBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
+      threadToken = extractThreadToken $ txOutTxOut txOut ^. outValue
+      -- Note: This is the bid on the current thread and therefore not necessarily the highest bid (of all currently known UTxOs).
+      Just oldThreadBid = txOutTxToBid txOut
+  logI'
+    "Placing bid"
+    [ ("UTxO index", show utxoIndex),
+      ("highest bid", show highestBid)
+    ]
+  let lookups =
+        Constraints.unspentOutputs utxoMap
+          <> Constraints.scriptInstanceLookups scrInst
+          <> Constraints.otherScript scr
+      constraints =
+        validBeforeDeadline (pEndTime params)
+          <> mustPayBackBid oldThreadBid
+          <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
+  -- Submit tx
+  ledgerTx <- submitTxConstraintsWith lookups constraints
+  void . awaitTxConfirmed . txId $ ledgerTx
 
   -- Print UTxO
   logI "Printing for tx confirmation"
@@ -463,51 +486,60 @@ close params = do
   utxoMap <- utxoAt scrAddr
   -- Debug
   printUtxos' params
-  -- FIXME Ugly. Define how to handle filtering and selecting more nicely.
   -- Filter for utxo with bidding state
   let threadUtxoMap = filterBiddingUTxOs utxoMap
-  case findMaxUTxORef threadUtxoMap of
-    Just (winningUtxoRef, otherUtxoRefs) -> do
-      let Just winningTxOut = Map.lookup winningUtxoRef threadUtxoMap
-          Just highestBid = txOutTxToBid winningTxOut
-          winningTxOutValue = txOutTxOut winningTxOut ^. outValue
-          -- FIXME: May fail if multiple thread tokens / non-Ada tokens are found
-          threadTokenValue = extractThreadToken winningTxOutValue
-          threadTokensValue = Value.scale (pThreadCount params) threadTokenValue
-          [holdUtxoRef] = Map.keys $ filterHoldUTxOs utxoMap
-      logI'' "Highest bid" "" $ show winningTxOut
-      logI'' "Thread token" "" $ show threadTokenValue
-      logI'' "Thread token all" "" $ show threadTokensValue
-      let lookups =
-            Constraints.unspentOutputs utxoMap
-              <> Constraints.scriptInstanceLookups scrInst
-              <> Constraints.otherScript scr
-          payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
-          constraints =
-            validAfterDeadline (pEndTime params)
-              -- FIXME Ugly
-              <> payBacks
-              <> mustPayOwner params winningUtxoRef highestBid
-              <> mustTransferAsset params holdUtxoRef highestBid
-              <> mustReturnThreadTokens threadTokensValue
-      -- Submit tx
-      ledgerTx <- submitTxConstraintsWith lookups constraints
-      logI "Waiting for tx confirmation"
-      void . awaitTxConfirmed . txId $ ledgerTx
-      -- Debug
-      printUtxos' params
-      pure ()
-    Nothing -> do
-      logI "Failed to find highest bid"
+  -- Check if thread UTxOs and expected thread count match
+  failWithIfFalse
+    (CheckError $ toLogT "Failed since wrong thread UTxO count"
+        [("thread count", show $ pThreadCount params),
+        ("utxo count", show $ Map.size threadUtxoMap)])
+    (hasCorrectUtxoCount (pThreadCount params) (Map.size threadUtxoMap))
+  -- Select winning UTxO
+  (winningUtxoRef, otherUtxoRefs) <- failWithIfNothing
+        (CheckError "Failed to find highest bin in all bidding UTxOs")
+        (findMaxUTxORef threadUtxoMap)
+  (winningTxOut, highestBid) <- failWithIfNothing
+    (CheckError "Failed to receive winning UTxO from UTxO ref") $ do
+        woref <- (Map.lookup winningUtxoRef threadUtxoMap)
+        wbid <- txOutTxToBid woref
+        pure (woref, wbid)
+  let winningTxOutValue = txOutTxOut winningTxOut ^. outValue
+      -- FIXME: May fail if multiple thread tokens / non-Ada tokens are found
+      threadTokenValue = extractThreadToken winningTxOutValue
+      threadTokensValue = Value.scale (pThreadCount params) threadTokenValue
+      -- FIXME: May fail if multiple Hold states
+      -- TODO How to prevent that anybody places an UTxO with a Hold state?
+      --   => Must ensure that Hold state comes from own script
+      [holdUtxoRef] = Map.keys $ filterHoldUTxOs utxoMap
+  logI' "Closing auction" [("highest bid", show highestBid),
+    ("thread token", show threadTokenValue)]
+  let lookups =
+        Constraints.unspentOutputs utxoMap
+          <> Constraints.scriptInstanceLookups scrInst
+          <> Constraints.otherScript scr
+      payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
+      constraints =
+        validAfterDeadline (pEndTime params)
+          -- FIXME Ugly
+          <> payBacks
+          <> mustPayOwner params winningUtxoRef highestBid
+          <> mustTransferAsset params holdUtxoRef highestBid
+          <> mustReturnThreadTokens threadTokensValue
+  -- Submit tx
+  ledgerTx <- submitTxConstraintsWith lookups constraints
+  logI "Waiting for tx confirmation"
+  void . awaitTxConfirmed . txId $ ledgerTx
+  -- Debug
+  printUtxos' params
   pure ()
   where
     payBackBid utxoMap utxoRef =
       -- FIXME Unsafe
-      let Just out = Map.lookup utxoRef utxoMap
+      let Just txOut = Map.lookup utxoRef utxoMap
           -- FIXME Unsafe
-          Just (Bid b pkh) = txOutTxToBid out
+          Just b = txOutTxToBid txOut
        in mustSpendScriptOutput utxoRef closeRedeemer
-            <> mustPayToPubKey pkh (Ada.toValue b)
+            <> mustPayBackBid b
 
 -- Helper
 createBiddingThreads ::
@@ -597,6 +629,15 @@ safeMax :: Haskell.Ord a => [a] -> Maybe a
 safeMax [] = Nothing
 safeMax bs = Just $ maximum bs
 
+failWithIfFalse :: ParallelAuctionError -> Bool -> ParallelAuctionContract ()
+failWithIfFalse e c = if Haskell.not c then throwError e else pure ()
+
+failWithIfNothing :: ParallelAuctionError -> Maybe a -> ParallelAuctionContract a
+failWithIfNothing e = \case
+  Just a -> pure a
+  Nothing -> throwError e
+
+
 -- Logging Helper
 printUtxos' :: ParallelAuctionParams -> ParallelAuctionContract ()
 printUtxos' = printUtxos . scrAddress
@@ -614,16 +655,22 @@ printUtxos scrAddr = do
             . _Just
   PlutusTx.Prelude.mapM_ (logI'' "UTxO datums" "datums") $ fmap show datums
 
+toLogS :: Haskell.String -> [(Haskell.String, Haskell.String)] -> Haskell.String
+toLogS t m = t <> printKeyValues m
+  where
+    printKeyValues [] = ""
+    printKeyValues m' = ": " <> List.intercalate ", " (fmap kvToString m')
+    kvToString (k, v) = k <> "=" <> show v
+
+toLogT :: Haskell.String -> [(Haskell.String, Haskell.String)] -> Text.Text
+toLogT t m = Text.pack $ toLogS t m
+
 logI :: Haskell.String -> Contract w s e ()
 logI = logInfo @Haskell.String
 
 -- TODO (sometime): Replace value tuples with HList.
 logI' :: Haskell.String -> [(Haskell.String, Haskell.String)] -> Contract w s e ()
-logI' t m = logInfo @Haskell.String $ t <> printKeyValues m
-  where
-    printKeyValues [] = ""
-    printKeyValues m' = ": " <> List.intercalate ", " (fmap kvToString m')
-    kvToString (k, v) = k <> "=" <> show v
+logI' t m = logInfo $ toLogS t m
 
 logI'' :: Haskell.String -> Haskell.String -> Haskell.String -> Contract w s e ()
 logI'' t k v = logI' t [(k, v)]
