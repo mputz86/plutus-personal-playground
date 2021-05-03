@@ -43,8 +43,9 @@ import Plutus.Contract
     select,
     submitTxConstraints,
     submitTxConstraintsWith,
+    throwError,
     utxoAt,
-    type (.\/), throwError
+    type (.\/),
   )
 import qualified Plutus.Contracts.Currency as Currency
 import qualified Plutus.V1.Ledger.Interval as Interval
@@ -207,14 +208,17 @@ mustReturnThreadTokens :: Value -> TxConstraints i ParallelAuctionDatum
 mustReturnThreadTokens = mustPayToTheScript Finished
 
 {-# INLINEABLE mustUseThreadTokenAndPayBid #-}
-mustUseThreadTokenAndPayBid :: TxOutRef -> Value -> Bid -> Bid -> TxConstraints i ParallelAuctionDatum
-mustUseThreadTokenAndPayBid utxoBidRef threadToken bid oldBid =
+mustUseThreadTokenAndPayBid :: TxOutRef -> Value -> Bid -> TxConstraints i ParallelAuctionDatum
+mustUseThreadTokenAndPayBid utxoBidRef threadToken bid =
   let inputBid = InputBid bid
       outputBid = Bidding bid
       payToScript = threadToken <> Ada.toValue (bBid bid)
    in mustSpendScriptOutput utxoBidRef (Redeemer $ PlutusTx.toData inputBid)
-        <> mustPayToPubKey (bBidder oldBid) (Ada.toValue $ bBid oldBid)
         <> mustPayToTheScript outputBid payToScript
+
+{-# INLINEABLE mustPayBackBid #-}
+mustPayBackBid :: Bid -> TxConstraints i ParallelAuctionDatum
+mustPayBackBid oldBid = mustPayToPubKey (bBidder oldBid) (Ada.toValue $ bBid oldBid)
 
 {-# INLINEABLE validAfterDeadline #-}
 validAfterDeadline :: Slot -> TxConstraints i o
@@ -400,7 +404,7 @@ start params = do
   printUtxos' params
 
 -- | Selects any of the existing thread UTxOs. For placing own bid by spending this UTxO.
-selectUtxoIndex :: PubKeyHash ->  Integer -> Int
+selectUtxoIndex :: PubKeyHash -> Integer -> Int
 selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
 
 -- | Assuming thread token
@@ -420,7 +424,6 @@ bid (params, b) = do
       highestBidMaybe = highestBidInUTxOs threadUtxoMap
   case highestBidMaybe of
     Just highestBid | highestBid Haskell.< ownBid -> do
-      logI'' "Overbidding highest bid" "highest bid" (show highestBid)
       let utxoIndex = selectUtxoIndex ownPkHash (pThreadCount params)
           -- FIXME Unsafe, but fine, assuming to have as many threads as UTxOs
           (utxoBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
@@ -428,15 +431,19 @@ bid (params, b) = do
           -- Note: This is not necessarily the (computed) highest bid. It is the bid on the
           --   current thread.
           Just oldThreadBid = txOutTxToBid txOut
-      logI' "Placing bid" [("UTxO index", show utxoIndex),
-        ("highest bid", show highestBid)]
+      logI'
+        "Placing bid"
+        [ ("UTxO index", show utxoIndex),
+          ("highest bid", show highestBid)
+        ]
       let lookups =
             Constraints.unspentOutputs utxoMap
               <> Constraints.scriptInstanceLookups scrInst
               <> Constraints.otherScript scr
           constraints =
             validBeforeDeadline (pEndTime params)
-              <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid oldThreadBid
+              <> mustPayBackBid oldThreadBid
+              <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
       -- Submit tx
       ledgerTx <- submitTxConstraintsWith lookups constraints
       void . awaitTxConfirmed . txId $ ledgerTx
@@ -478,7 +485,7 @@ close params = do
           payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
           constraints =
             validAfterDeadline (pEndTime params)
-            -- FIXME Ugly
+              -- FIXME Ugly
               <> payBacks
               <> mustPayOwner params winningUtxoRef highestBid
               <> mustTransferAsset params holdUtxoRef highestBid
@@ -497,7 +504,7 @@ close params = do
     payBackBid utxoMap utxoRef =
       -- FIXME Unsafe
       let Just out = Map.lookup utxoRef utxoMap
-      -- FIXME Unsafe
+          -- FIXME Unsafe
           Just (Bid b pkh) = txOutTxToBid out
        in mustSpendScriptOutput utxoRef closeRedeemer
             <> mustPayToPubKey pkh (Ada.toValue b)
