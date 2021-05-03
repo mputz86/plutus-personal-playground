@@ -43,12 +43,51 @@ import qualified Plutus.V1.Ledger.Scripts (unitDatum, unitRedeemer)
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
 import PlutusTx.AssocMap as PlutusTxMap
-import PlutusTx.Builtins
 import PlutusTx.Prelude hiding (Semigroup (..), unless)
 import qualified PlutusTx.Prelude as PlutusTx
 import Text.Printf (printf)
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
+
+-- Idea:
+--
+--
+-- # Question
+-- - How does Datum look like?
+-- - How does spin offs look like?
+-- - How does closing Tx look like
+--
+--
+-- # Validator
+-- For
+--
+-- # Endpoints
+-- - Create
+-- - Bid
+-- - Close
+--   - Anybody, incentivized by highest bidder
+--
+-- # Initiator / Closer
+-- - Forge tokens
+--
+--
+-- # Bidder
+-- - Choose one of the possible UTxOs for bidding
+-- - Maybe something with hash and wrap around number of availabe UTxO
+-- - Look at all at once and choose a max
+-- - Bid by extending one of the UTxOs
+--
+-- # Close
+-- - Tx must have all UTxO of initial auction
+-- - Auction collects highest bids of all threads and computes highest bit
+-- - Pay back non-highest bid
+--
+-- # Test
+-- - Allow multiple bidders in one Slot / at the same time
+-- - Bids on same UTxO lead to some invalid Tx
+-- - But most should go through if enough open UTxO
+--
+--
 
 data ParallelAuctionParams = ParallelAuctionParams
   { -- | Receiver of highest bid after auction was closed.
@@ -82,6 +121,7 @@ instance Haskell.Ord Bid where
 
 PlutusTx.unstableMakeIsData ''Bid
 
+-- FIXME Rename to ParallelAuctionState
 data ParallelAuctionDatum
   = -- | State which holds asset
     Hold
@@ -94,29 +134,79 @@ data ParallelAuctionDatum
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionDatum
 
-data ParallelAuctionInput = InputBid Bid | InputClose
+data ParallelAuctionInput
+    = InputBid Bid
+    | InputClose
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
-{-# INLINEABLE mkValidator #-}
-mkValidator :: ParallelAuctionParams -> ParallelAuctionDatum -> ParallelAuctionInput -> ScriptContext -> Bool
-mkValidator params datum (InputBid bid) ctx@ScriptContext {scriptContextTxInfo = txInfo} =
+-- TODO Checks:
+-- - Ensure one input
+-- - Ensure input contains correct token
+-- - Only one output
+-- - Output goes back to script
+-- - Output contains token
+{-# INLINEABLE validateNewBid #-}
+validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
+validateNewBid params ctx@ScriptContext{scriptContextTxInfo=txInfo} curBid newBid =
   traceIfFalse
     "New bid is not higher"
-    (checkNewBidIsHigher' datum bid)
+    (checkNewBidIsHigher curBid newBid)
     && traceIfFalse
       "Auction is not open anymore"
-      (checkAuctionIsStillOpen params ctx)
+      (checkAuctionIsStillOpen params txInfo)
     && traceIfFalse
       "Bid is not valid thread continuation"
       (checkIsBiddingThread ctx)
--- Ensure one input
--- Ensure input contains correct token
--- Only one output
--- Output goes back to script
--- Output contains token
 
-mkValidator params _ InputClose _ = True
+{-# INLINEABLE validateCloseBiddingThread #-}
+validateCloseBiddingThread :: ParallelAuctionParams -> ScriptContext -> Bid -> Bool
+validateCloseBiddingThread params ctx bid =
+  traceIfFalse
+    "No valid closing transaction"
+    (validateIsClosingTx params ctx)
+    && trace "Closing bidding" True
+
+{-# INLINEABLE validateCloseAuction #-}
+validateCloseAuction :: ParallelAuctionParams -> ScriptContext -> Bool
+validateCloseAuction params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
+  traceIfFalse
+    "No valid closing transaction"
+    (validateIsClosingTx params ctx)
+    && trace "Closing auction" True
+
+-- TODO Checks
+-- - Closes all threads
+-- - Spends highest bid to owner
+-- - Spends hold UTxO
+-- - Spends asset to highest bidder
+{-# INLINEABLE validateIsClosingTx #-}
+validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
+validateIsClosingTx params ctx@ScriptContext{scriptContextTxInfo=txInfo} =
+    True
+
+{-# INLINEABLE mkValidator #-}
+mkValidator ::
+  ParallelAuctionParams ->
+  ParallelAuctionDatum ->
+  ParallelAuctionInput ->
+  ScriptContext ->
+  Bool
+mkValidator params state input ctx =
+  case (state, input) of
+    -- Transition within a bidding thread
+    (Bidding curBid, InputBid newBid) ->
+        validateNewBid params ctx curBid newBid
+    -- Transition from bidding thread to closed auction
+    (Bidding curBid, InputClose) ->
+        validateCloseBiddingThread params ctx curBid
+    -- Transition from auction state to closed auction
+    (Hold, InputClose) ->
+        validateCloseAuction params ctx
+    -- Not allowed transitions
+    (Finished, _) ->
+        trace "Invalid transition from state finished" False
+    _ -> trace "Unknown transition" False
 
 -- Check on transaction
 -- - Must contain all (and only) inputs with thread token
@@ -137,14 +227,11 @@ mkValidator params _ InputClose _ = True
 checkNewBidIsHigher :: Bid -> Bid -> Bool
 checkNewBidIsHigher (Bid curBid _) (Bid newBid _) = curBid < newBid
 
-checkNewBidIsHigher' :: ParallelAuctionDatum -> Bid -> Bool
-checkNewBidIsHigher' datum = checkNewBidIsHigher (dHighestBid datum)
-
 checkDeadlineNotReached :: Slot -> SlotRange -> Bool
 checkDeadlineNotReached = after
 
-checkAuctionIsStillOpen :: ParallelAuctionParams -> ScriptContext -> Bool
-checkAuctionIsStillOpen params ScriptContext {scriptContextTxInfo = txInfo} =
+checkAuctionIsStillOpen :: ParallelAuctionParams -> TxInfo -> Bool
+checkAuctionIsStillOpen params txInfo =
   checkDeadlineNotReached (pEndTime params) (txInfoValidRange txInfo)
 
 checkIsBiddingThread :: ScriptContext -> Bool
@@ -464,12 +551,12 @@ printUTxODatums :: ParallelAuctionParams -> ParallelAuctionContract ()
 printUTxODatums params = do
   utxoMap <- utxoAt $ scrAddress params
   logI'' "UTxO count" "count" $ show (Map.size utxoMap)
-  let datums :: [ParallelAuctionDatum] =
+  let datums :: [(Value, ParallelAuctionDatum)] =
         utxoMap
           ^.. folded
-            . Control.Lens.to txOutTxDatum
+            . Control.Lens.to (\o -> (txOutValue $ txOutTxOut o,) <$> txOutTxDatum o)
             . _Just
-            . Control.Lens.to (\(Datum d) -> PlutusTx.fromData @ParallelAuctionDatum d)
+            . Control.Lens.to (\(v, Datum d) -> (v,) <$> PlutusTx.fromData @ParallelAuctionDatum d)
             . _Just
   PlutusTx.Prelude.mapM_ (logI'' "UTxO datums" "datums") $ fmap show datums
 
