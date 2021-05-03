@@ -29,9 +29,11 @@ import Ledger.AddressMap (UtxoMap)
 import Ledger.Constraints as Constraints
 import qualified Ledger.Typed.Scripts as Scripts
 import Plutus.Contract hiding (when)
+import Plutus.V1.Ledger.Value
 import qualified Plutus.Contracts.Currency as Currency
 import qualified Plutus.Trace.Emulator as Emulator
 import qualified PlutusTx
+import qualified PlutusTx.AssocMap as AssocMap
 import PlutusTx.Prelude hiding (Semigroup (..), unless)
 import qualified Wallet.Emulator.Wallet as Wallet
 import Prelude (Semigroup (..))
@@ -114,13 +116,15 @@ start = do
   let ownPkHash = pubKeyHash ownPk
       scrInst = inst
       scr = validator
+  tokenCurrency <- Currency.forgeContract ownPkHash [("tracing-token", 1)]
+  let tokenValue = Currency.forgedValue tokenCurrency
   utxoMap <- utxoAt scrAddress
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups scrInst
           <> Constraints.otherScript scr
       placeInitialBid =
-        mustPayToTheScript (PayBackDatum $ Bid 0 ownPkHash) mempty
+        mustPayToTheScript (PayBackDatum $ Bid 0 ownPkHash) tokenValue
       constraints = placeInitialBid
   logI "Starting bidding"
   ledgerTx <- submitTxConstraintsWith lookups constraints
@@ -136,8 +140,12 @@ bid b = do
       ownBid = Bid (Ada.Lovelace b) ownPkHash
   logI' "Trying to place bid" [("pk", show ownPk), ("bid", show b)]
   utxoMap <- utxoAt scrAddress
-  let (oref, txOutTx) = head . Map.toList $ utxoMap
+  let (oref, txOutTx@TxOutTx{txOutTxOut=txOut}) = head . Map.toList $ utxoMap
       Just oldBid = txOutTxToBid txOutTx
+      tokenValue =
+          let Value x = txOut ^. outValue
+              r = AssocMap.delete Ada.adaSymbol x
+           in Value r
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups scrInst
@@ -145,11 +153,12 @@ bid b = do
       constraints =
         mustSpendScriptOutput oref (Redeemer $ PlutusTx.toData $ PayBackInput ownBid)
           <> mustPayToPubKey (bBidder oldBid) (Ada.toValue $ bBid oldBid)
-          <> mustPayToTheScript (PayBackDatum ownBid) (Ada.toValue $ bBid ownBid)
+          <> mustPayToTheScript (PayBackDatum ownBid) (tokenValue <> Ada.toValue (bBid ownBid))
   logI'
     "Paying back"
     [ ("old bid", show oldBid),
-      ("own bid", show ownBid)
+      ("own bid", show ownBid),
+      ("token value", show tokenValue)
     ]
   ledgerTx <- submitTxConstraintsWith lookups constraints
   logI "Waiting for tx confirmation"
