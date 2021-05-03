@@ -24,15 +24,19 @@ testBidding :: IO ()
 testBidding = runEmulatorTraceIO' def emulatorConfig $ do
   h1 <- activateContractWallet w1 endpoints
   h2 <- activateContractWallet w2 endpoints
+  -- Starting
   Extras.logInfo @String $ "Wallet 1 starts auction"
   callEndpoint @"start" h1 theAuction
+  -- Bidding
   void $ waitUntilSlot 5
   Extras.logInfo @String $ "Wallet 2 bids"
   callEndpoint @"bid" h2 (theAuction, 400)
-  s <- waitNSlots 10
+  -- Closing
+  void $ waitUntilSlot (pEndTime theAuction)
   -- FIXME Close with any wallet
   callEndpoint @"close" h1 theAuction
-  Extras.logInfo $ "END" ++ show s
+  s <- waitNSlots 1
+  Extras.logInfo $ "Exit" ++ show s
 
 
 w1, w2, w3 :: Wallet
@@ -71,15 +75,18 @@ testTrace = do
   h1 <- activateContractWallet w1 endpoints
   h2 <- activateContractWallet w2 endpoints
   h3 <- activateContractWallet w3 endpoints
+  -- Starting
   Extras.logInfo @String $ "w1 starts"
   callEndpoint @"start" h1 theAuction
+  -- Bidding
   void $ waitUntilSlot 5
   Extras.logInfo @String $ "w2 is bidding"
   callEndpoint @"bid" h2 (theAuction, 400)
   callEndpoint @"bid" h3 (theAuction, 100)
   -- callEndpoint @"bid" h3 (theAuction, 300)
-  void $ waitUntilSlot 5
-  s <- waitNSlots 1
+  -- Closing
+  s <- waitUntilSlot (pEndTime theAuction)
   -- FIXME Close with any wallet
   callEndpoint @"close" h1 theAuction
-  Extras.logInfo $ "END" ++ show s
+  void $ waitNSlots 1
+  Extras.logInfo $ "Exit" ++ show s

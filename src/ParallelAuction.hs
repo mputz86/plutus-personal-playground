@@ -42,7 +42,7 @@ import qualified Plutus.V1.Ledger.Interval as Interval
 import qualified Plutus.V1.Ledger.Scripts (unitDatum, unitRedeemer)
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
-import PlutusTx.AssocMap as PlutusTxMap
+import PlutusTx.AssocMap as PlutusTxMap ( lookup, singleton )
 import PlutusTx.Prelude
     ( fromIntegral,
       Enum(succ),
@@ -168,6 +168,11 @@ data ParallelAuctionInput
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
+{-# INLINEABLE closeRedeemer #-}
+-- | Untyped redeemer for 'InputClose' input.
+closeRedeemer :: Redeemer
+closeRedeemer = Redeemer $ PlutusTx.toData InputClose
+
 mustUseThreadTokenAndPayBid :: TxOutRef -> Value -> Bid -> TxConstraints i ParallelAuctionDatum
 mustUseThreadTokenAndPayBid utxoBidRef threadToken bid =
   let inputBid = InputBid bid
@@ -191,13 +196,13 @@ validBeforeDeadline deadline =
 checkConstraints :: TxConstraints ParallelAuctionInput ParallelAuctionDatum -> ScriptContext -> Bool
 checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionDatum
 
+{-# INLINEABLE validateNewBid #-}
 -- TODO Checks:
 -- - Ensure one input
 -- - Ensure input contains correct token
 -- - Only one output
 -- - Output goes back to script
 -- - Output contains token
-{-# INLINEABLE validateNewBid #-}
 validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
 validateNewBid params ctx@ScriptContext{scriptContextTxInfo=txInfo} curBid newBid =
   traceIfFalse
@@ -226,12 +231,12 @@ validateCloseAuction params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
     (validateIsClosingTx params ctx)
     && trace "Closing auction" True
 
+{-# INLINEABLE validateIsClosingTx #-}
 -- TODO Checks
 -- - Closes all threads
 -- - Spends highest bid to owner
 -- - Spends hold UTxO
 -- - Spends asset to highest bidder
-{-# INLINEABLE validateIsClosingTx #-}
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
 validateIsClosingTx params ctx@ScriptContext{scriptContextTxInfo=txInfo} =
     True
@@ -407,8 +412,15 @@ bid (params, b) = do
   printUTxODatums params
   pure ()
 
+{-# INLINEABLE mustPayOwner #-}
+mustPayOwner :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
+mustPayOwner params winningUtxoRef highestBid =
+  mustSpendScriptOutput winningUtxoRef (Redeemer $ PlutusTx.toData InputClose)
+    <> mustPayToPubKey (pOwner params) (Ada.toValue $ bBid highestBid)
+
 close :: ParallelAuctionParams -> ParallelAuctionContract ()
 close params = do
+  curSlot <- currentSlot
   let scrInst = inst params
       scr = validator params
   logI "Closing auction"
@@ -435,9 +447,6 @@ close params = do
               <> Constraints.scriptInstanceLookups scrInst
               <> Constraints.otherScript scr
           payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
-          payOwner =
-            mustSpendScriptOutput winningUtxoRef closeRedeemer
-              <> mustPayToPubKey (pOwner params) (Ada.toValue $ bBid highestBid)
           transferAsset =
             mustSpendScriptOutput holdUtxoRef closeRedeemer
               <> mustPayToPubKey (bBidder highestBid) (pAsset params)
@@ -449,9 +458,10 @@ close params = do
         submitTxConstraintsWith lookups $
           validAfterDeadline (pEndTime params)
             <> payBacks
-            <> payOwner
+            <> mustPayOwner params winningUtxoRef highestBid
             <> transferAsset
             <> burnThreadTokens
+
       logI "Waiting for tx confirmation"
       void . awaitTxConfirmed . txId $ ledgerTx
 
@@ -464,7 +474,6 @@ close params = do
       logI "Failed to find highest bid"
   pure ()
   where
-    closeRedeemer = Redeemer $ PlutusTx.toData InputClose
     payBackBid utxoMap utxoRef =
       -- FIXME Unsafe
       let Just out = Map.lookup utxoRef utxoMap
