@@ -43,7 +43,35 @@ import qualified Plutus.V1.Ledger.Scripts (unitDatum, unitRedeemer)
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
 import PlutusTx.AssocMap as PlutusTxMap
-import PlutusTx.Prelude hiding (Semigroup (..), unless)
+import PlutusTx.Prelude
+    ( fromIntegral,
+      Enum(succ),
+      Integral(mod),
+      Show(show),
+      maximum,
+      Bool(..),
+      Int,
+      Integer,
+      Maybe(..),
+      Ordering(GT, EQ),
+      (.),
+      mapM_,
+      replicate,
+      Applicative(pure),
+      Functor(fmap),
+      Eq((==)),
+      Ord((<), compare),
+      AdditiveGroup((-)),
+      length,
+      id,
+      mconcat,
+      (<$>),
+      (&&),
+      (/=),
+      fromMaybe,
+      ($),
+      trace,
+      traceIfFalse )
 import qualified PlutusTx.Prelude as PlutusTx
 import Text.Printf (printf)
 import Prelude (Semigroup (..))
@@ -140,6 +168,29 @@ data ParallelAuctionInput
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
+mustUseThreadTokenAndPayBid :: TxOutRef -> Value -> Bid -> TxConstraints i ParallelAuctionDatum
+mustUseThreadTokenAndPayBid utxoBidRef threadToken bid =
+  let inputBid = InputBid bid
+      outputBid = Bidding bid
+      payToScript = threadToken <> Ada.toValue (bBid bid)
+   in mustSpendScriptOutput utxoBidRef (Redeemer $ PlutusTx.toData inputBid)
+        <> mustPayToTheScript outputBid payToScript
+
+{-# INLINEABLE validAfterDeadline #-}
+validAfterDeadline :: Slot -> TxConstraints i o
+validAfterDeadline deadline = mustValidateIn (Interval.from deadline)
+
+{-# INLINEABLE validBeforeDeadline #-}
+validBeforeDeadline :: Slot -> TxConstraints i o
+validBeforeDeadline deadline =
+  -- FIXME @Lars: Using (Enum.pred deadline) leads to failing on-chain code. Intended?
+  mustValidateIn (Interval.to $ deadline - 1)
+
+{-# INLINEABLE checkConstraints #-}
+-- | Version of 'checkScriptContext' with fixed types for this contract.
+checkConstraints :: TxConstraints ParallelAuctionInput ParallelAuctionDatum -> ScriptContext -> Bool
+checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionDatum
+
 -- TODO Checks:
 -- - Ensure one input
 -- - Ensure input contains correct token
@@ -154,7 +205,7 @@ validateNewBid params ctx@ScriptContext{scriptContextTxInfo=txInfo} curBid newBi
     (checkNewBidIsHigher curBid newBid)
     && traceIfFalse
       "Auction is not open anymore"
-      (checkAuctionIsStillOpen params txInfo)
+      (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
     && traceIfFalse
       "Bid is not valid thread continuation"
       (checkIsBiddingThread ctx)
@@ -226,13 +277,6 @@ mkValidator params state input ctx =
 
 checkNewBidIsHigher :: Bid -> Bid -> Bool
 checkNewBidIsHigher (Bid curBid _) (Bid newBid _) = curBid < newBid
-
-checkDeadlineNotReached :: Slot -> SlotRange -> Bool
-checkDeadlineNotReached = after
-
-checkAuctionIsStillOpen :: ParallelAuctionParams -> TxInfo -> Bool
-checkAuctionIsStillOpen params txInfo =
-  checkDeadlineNotReached (pEndTime params) (txInfoValidRange txInfo)
 
 checkIsBiddingThread :: ScriptContext -> Bool
 checkIsBiddingThread ctx =
@@ -307,7 +351,7 @@ start params = do
   let ownPkHash = pubKeyHash ownPk
       scrInst = inst params
   -- Create bidding threads
-  ts <- createBiddingThreads ownPkHash (pThreadCount params)
+  ts :: _ <- createBiddingThreads ownPkHash (pThreadCount params)
   -- Create tx constraints
   let -- Constraint to pay one thread token to each thread with inital bidding state
       distributeThreadTokensToThreads =
@@ -329,14 +373,10 @@ start params = do
 bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
 bid (params, b) = do
   ownPk <- ownPubKey
-  curSlot <- currentSlot
   let ownPkHash = pubKeyHash ownPk
       scrInst = inst params
       scr = validator params
       ownBid = Bid (Ada.Lovelace b) ownPkHash
-      inputBid = InputBid ownBid
-      outputBid = Bidding ownBid
-      validTo = Interval.to $ succ curSlot
   logI' "Trying to place bid" [("pk", show ownPk), ("bid", show b)]
   utxoMap <- utxoAt (scrAddress params)
   let threadUtxoMap = filterBiddingUTxOs utxoMap
@@ -347,27 +387,18 @@ bid (params, b) = do
   -- Select an UTxOs by using public key hash and thread count
   let utxoIndex :: Int = hash ownPkHash `mod` fromIntegral (pThreadCount params)
       -- FIXME Unsafe operations, ensure threadUtxoMap has the same amount as `threadCount`
-      (utxoToBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
+      (utxoBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
       threadToken = txOutTxOut txOut ^. outValue
 
   logI'' "Choosing UTxO" "index" $ show utxoIndex
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups scrInst
-           <> Constraints.otherScript scr
-      -- Built constraints on our own
-      allowOnlyBeforeDeadline =
-        mustValidateIn validTo
-      -- FIXME: Datum should be the updated one from the existing tx
-      -- FIXME: Use constraint creation methods and combine instead of manyally creating
-      mustUseThreadToken =
-          mustSpendScriptOutput utxoToBidRef (Redeemer $ PlutusTx.toData inputBid)
-          <> mustPayToTheScript outputBid (threadToken <> Ada.toValue (bBid ownBid))
-  -- Submit tx
+          <> Constraints.otherScript scr
   ledgerTx <-
     submitTxConstraintsWith lookups $
-      allowOnlyBeforeDeadline
-        <> mustUseThreadToken -- txConstrs
+      validBeforeDeadline (pEndTime params)
+        <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
   logI "Waiting for tx confirmation"
   void . awaitTxConfirmed . txId $ ledgerTx
 
@@ -378,11 +409,8 @@ bid (params, b) = do
 
 close :: ParallelAuctionParams -> ParallelAuctionContract ()
 close params = do
-  curSlot <- currentSlot
-  srcInst <- pure $ inst params
   let scrInst = inst params
       scr = validator params
-      validFrom = Interval.from $ curSlot
   logI "Closing auction"
   utxoMap <- utxoAt (scrAddress params)
   -- Filter for utxo with bidding state
@@ -406,8 +434,6 @@ close params = do
             Constraints.unspentOutputs utxoMap
               <> Constraints.scriptInstanceLookups scrInst
               <> Constraints.otherScript scr
-          allowOnlyAfterDeadline =
-            mustValidateIn validFrom
           payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
           payOwner =
             mustSpendScriptOutput winningUtxoRef closeRedeemer
@@ -421,7 +447,7 @@ close params = do
       -- Submit tx
       ledgerTx <-
         submitTxConstraintsWith lookups $
-          allowOnlyAfterDeadline
+          validAfterDeadline (pEndTime params)
             <> payBacks
             <> payOwner
             <> transferAsset
@@ -452,7 +478,7 @@ createBiddingThreads ::
   Integer ->
   ParallelAuctionContract [Value]
 createBiddingThreads pkHash threadCount = do
-  c <- Currency.forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
+  c :: _ <- Currency.forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
   pure . toSingleValues . Currency.forgedValue $ c
 
 toSingleValues :: Value -> [Value]
