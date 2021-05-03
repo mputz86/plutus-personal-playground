@@ -12,6 +12,7 @@ library
   hs-source-dirs:      src
   exposed-modules:     ParallelAuction
                      , ParallelAuctionTrace
+                     , PayBackIssue
                      , Plutus.Contracts.Currency
                      , Plutus.Contracts.PubKey
   build-depends:       aeson
