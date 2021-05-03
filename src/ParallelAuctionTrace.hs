@@ -116,6 +116,6 @@ testTraceSequentialBid = do
   -- Closing
   s <- waitUntilSlot (pEndTime auction)
   -- FIXME Close with any wallet
-  --callEndpoint @"close" h1 auction
+  callEndpoint @"close" h1 auction
   void $ waitNSlots 1
   Extras.logInfo $ "Exit" ++ show s

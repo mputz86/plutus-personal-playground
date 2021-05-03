@@ -173,9 +173,17 @@ data ParallelAuctionInput
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
-{-# INLINEABLE closeRedeemer #-}
+{-# INLINEABLE mustDistributeThreadTokensWithInitBid #-}
+mustDistributeThreadTokensWithInitBid :: Bid -> [Value] -> TxConstraints i ParallelAuctionDatum
+mustDistributeThreadTokensWithInitBid initialBid tokenValues =
+  mconcat $ fmap (mustPayToTheScript $ Bidding initialBid) tokenValues
+
+{-# INLINEABLE mustPayAssetFromOwnerToScript #-}
+mustPayAssetFromOwnerToScript :: Value -> TxConstraints i ParallelAuctionDatum
+mustPayAssetFromOwnerToScript = mustPayToTheScript Hold
 
 -- | Untyped redeemer for 'InputClose' input.
+{-# INLINEABLE closeRedeemer #-}
 closeRedeemer :: Redeemer
 closeRedeemer = Redeemer $ PlutusTx.toData InputClose
 
@@ -191,11 +199,9 @@ mustTransferAsset params holdUtxoRef highestBid =
   mustSpendScriptOutput holdUtxoRef closeRedeemer
     <> mustPayToPubKey (bBidder highestBid) (pAsset params)
 
-{-# INLINEABLE mustReturnThreadTokens #-}
-
 -- | Returns thread tokens back to script.
---   FIXME Better to burn them?
---   FIXME @Lars How to burn these tokens? Using Currency from use-cases.
+--   FIXME Better to burn them? How to burn these tokens? Using Currency from use-cases.
+{-# INLINEABLE mustReturnThreadTokens #-}
 mustReturnThreadTokens :: Value -> TxConstraints i ParallelAuctionDatum
 mustReturnThreadTokens = mustPayToTheScript Finished
 
@@ -219,19 +225,18 @@ validBeforeDeadline deadline =
   -- FIXME @Lars: Using (Enum.pred deadline) leads to failing on-chain code. Intended?
   mustValidateIn (Interval.to $ deadline - 1)
 
-{-# INLINEABLE checkConstraints #-}
-
 -- | Version of 'checkScriptContext' with fixed types for this contract.
+{-# INLINEABLE checkConstraints #-}
 checkConstraints :: TxConstraints ParallelAuctionInput ParallelAuctionDatum -> ScriptContext -> Bool
 checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionDatum
 
-{-# INLINEABLE validateNewBid #-}
 -- TODO Checks:
 -- - Ensure one input
 -- - Ensure input contains correct token
 -- - Only one output
 -- - Output goes back to script
 -- - Output contains token
+{-# INLINEABLE validateNewBid #-}
 validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
 validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo} curBid newBid =
   traceIfFalse
@@ -240,10 +245,9 @@ validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo} curBid ne
     && traceIfFalse
       "Auction is not open anymore"
       (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
-
--- && traceIfFalse
---   "Bid is not valid thread continuation"
---   (checkIsBiddingThread ctx)
+    && traceIfFalse
+      "Bid is not valid thread continuation"
+      (checkIsBiddingThread ctx)
 
 {-# INLINEABLE validateCloseBiddingThread #-}
 validateCloseBiddingThread :: ParallelAuctionParams -> ScriptContext -> Bid -> Bool
@@ -263,7 +267,7 @@ validateCloseAuction params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
 
 {-# INLINEABLE validateIsClosingTx #-}
 -- TODO Checks
--- - Closes all threads
+-- - Closes all bidding threads
 -- - Spends highest bid to owner
 -- - Spends hold UTxO
 -- - Spends asset to highest bidder
@@ -281,14 +285,11 @@ mkValidator ::
 mkValidator params state input ctx =
   case (state, input) of
     -- Transition within a bidding thread
-    (Bidding curBid, InputBid newBid) ->
-      validateNewBid params ctx curBid newBid
+    (Bidding curBid, InputBid newBid) -> validateNewBid params ctx curBid newBid
     -- Transition from bidding thread to closed auction
-    (Bidding curBid, InputClose) ->
-      validateCloseBiddingThread params ctx curBid
-    -- Transition from auction state to closed auction
-    (Hold, InputClose) ->
-      validateCloseAuction params ctx
+    (Bidding curBid, InputClose) -> validateCloseBiddingThread params ctx curBid
+    -- Transition from open auction to closed auction
+    (Hold, InputClose) -> validateCloseAuction params ctx
     -- Not allowed transitions
     (Finished, _) ->
       trace "Invalid transition from state finished" False
@@ -367,11 +368,6 @@ type ParallelAuctionSchema =
 -- Simplify type for auction contract.
 type ParallelAuctionContract a = Contract () ParallelAuctionSchema ParallelAuctionError a
 
--- Get utxos
-
--- TODO
--- - Make sure start can only be called once
--- - Make sure close only closes if done
 endpoints :: ParallelAuctionContract ()
 endpoints = (start' `select` bid' `select` close') >> endpoints
   where
@@ -379,40 +375,37 @@ endpoints = (start' `select` bid' `select` close') >> endpoints
     bid' = endpoint @"bid" >>= bid
     close' = endpoint @"close" >>= close
 
+-- | Initiates the auction:
+--   - Creates a new currency with a token amount equal to the thread count, thread tokens
+--   - Each thread token gets it's own UTxO with an initial bid datum (state Bidding)
+--   - The asset is transferred from the owner to the script
+--   - The asset is hold in a separate UTxO with state Hold
 start :: ParallelAuctionParams -> ParallelAuctionContract ()
 start params = do
   -- General values
-  ownPk <- ownPubKey
-  let ownPkHash = pubKeyHash ownPk
-      scrInst = inst params
+  ownPkHash <- pubKeyHash <$> ownPubKey
+  let scrInst = inst params
   -- Create bidding threads (UTxOs)
-  ts <- createBiddingThreads ownPkHash (pThreadCount params)
+  threadTokenValues <- createBiddingThreads ownPkHash (pThreadCount params)
   -- Create tx constraints
-  let -- Constraint to pay one thread token to each thread with inital bidding state
-      distributeThreadTokensToThreads =
-        mconcat $ fmap (mustPayToTheScript . Bidding $ Bid 0 ownPkHash) ts
-      -- Constraint to pay offered asset to script, hold in script until auction closes
-      payAssetFromOwnerToScript =
-        mustPayToTheScript Hold (pAsset params)
-      constraints =
-        distributeThreadTokensToThreads
-          <> payAssetFromOwnerToScript
+  let constraints =
+        mustDistributeThreadTokensWithInitBid (Bid 0 ownPkHash) threadTokenValues
+          <> mustPayAssetFromOwnerToScript (pAsset params)
   logI "Starting auction"
   ledgerTx <- submitTxConstraints scrInst constraints
   void . awaitTxConfirmed . txId $ ledgerTx
-  -- Debug: Verify current state
-  printUTxODatums' params
+  -- Debug: Print UTxOs
+  printUtxos' params
 
--- | TODO
 bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
 bid (params, b) = do
-  ownPk <- ownPubKey
-  let ownPkHash = pubKeyHash ownPk
-      scrInst = inst params
+  ownPkHash <- pubKeyHash <$> ownPubKey
+  let scrInst = inst params
       scr = validator params
+      scrAddr = scrAddress params
       ownBid = Bid (Ada.Lovelace b) ownPkHash
-  logI' "Trying to place bid" [("pk", show ownPk), ("bid", show b)]
-  utxoMap <- utxoAt (scrAddress params)
+  logI' "Trying to place bid" [("pk hash", show ownPkHash), ("bid", show b)]
+  utxoMap <- utxoAt scrAddr
   let threadUtxoMap = filterBiddingUTxOs utxoMap
   let highestBid = highestBidInUTxOs threadUtxoMap
   logI'' "Checking if bidding highest for all UTxOs" "highest bid" (show highestBid)
@@ -449,18 +442,19 @@ bid (params, b) = do
 
   -- Print UTxO
   logI "Printing for tx confirmation"
-  printUTxODatums' params
+  printUtxos' params
   pure ()
 
 close :: ParallelAuctionParams -> ParallelAuctionContract ()
 close params = do
   let scrInst = inst params
       scr = validator params
+      scrAddr = scrAddress params
   logI "Closing auction"
-  utxoMap <- utxoAt (scrAddress params)
+  utxoMap <- utxoAt scrAddr
   -- Filter for utxo with bidding state
   let threadUtxoMap = filterBiddingUTxOs utxoMap
-  printUTxODatums' params
+  printUtxos' params
   case findMaxUTxORef threadUtxoMap of
     Just (winningUtxoRef, otherUtxoRefs) -> do
       logI "Paying back"
@@ -493,7 +487,7 @@ close params = do
 
       -- Print UTxO
       logI "Printing for tx confirmation"
-      printUTxODatums' params
+      printUtxos' params
 
       pure ()
     Nothing -> do
@@ -596,12 +590,12 @@ safeMax [] = Nothing
 safeMax bs = Just $ maximum bs
 
 -- Logging Helper
-printUTxODatums' :: ParallelAuctionParams -> ParallelAuctionContract ()
-printUTxODatums' = printUTxODatums . scrAddress
+printUtxos' :: ParallelAuctionParams -> ParallelAuctionContract ()
+printUtxos' = printUtxos . scrAddress
 
-printUTxODatums :: Ledger.Address -> ParallelAuctionContract ()
-printUTxODatums scrAddr = do
-  utxoMap <- utxoAt $ scrAddr
+printUtxos :: Ledger.Address -> ParallelAuctionContract ()
+printUtxos scrAddr = do
+  utxoMap <- utxoAt scrAddr
   logI'' "UTxO count" "count" $ show (Map.size utxoMap)
   let datums :: [(Value, ParallelAuctionDatum)] =
         utxoMap
