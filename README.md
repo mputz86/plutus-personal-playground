@@ -24,6 +24,15 @@ Using it:
 - Run `testParallelBidding`, `testSequentialBidding` or `testSimpleBidding`
 
 
+## Test Case: Tx Input Datum in Validator / On Chain
+
+See [src/InputTxDatumsIssue.hs](src/InputTxDatumsIssue.hs) for the implementation.
+
+Assumed that a validator has access to `Datum` of the UTxOs spent by the transaction. Since there is a `DatumHash` given, it is `Just ...`. But the hash can nowhere used.
+
+
 ## Test Case: Payback
+
+See [src/PayBackIssue.hs](src/PayBackIssue.hs) for the implementation.
 
 Somehow paying back an UTxO with a token attached resulted in the transaction submitter "payed the payback". Problem was the missing split of the value of the UTxO into the native (ADA) amount and the token before using the value.

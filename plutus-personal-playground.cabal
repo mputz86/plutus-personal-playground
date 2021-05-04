@@ -10,7 +10,8 @@ License-files:       LICENSE
 
 library
   hs-source-dirs:      src
-  exposed-modules:     ParallelAuction
+  exposed-modules:     InputTxDatumsIssue
+                     , ParallelAuction
                      , ParallelAuctionTrace
                      , PayBackIssue
                      , Plutus.Contracts.Currency
