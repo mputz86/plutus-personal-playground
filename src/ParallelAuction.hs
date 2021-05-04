@@ -81,10 +81,12 @@ import PlutusTx.Prelude
     fromIntegral,
     fromMaybe,
     id,
+    isJust,
     length,
     mapM_,
     maximum,
     mconcat,
+    not,
     replicate,
     snd,
     trace,
@@ -216,6 +218,7 @@ splitNativeAndThreadToken v =
       token = do
         os <- others
         case Value.flattenValue os of
+          -- FIXME Note: On-Chain code compilation fails if matched directly on value 1
           [(cs, tn, a)] | a == 1 -> Just $ Value.singleton cs tn 1
           -- Fail because of: No token, wrong amount of single token or too many tokens
           _ -> Nothing
@@ -285,35 +288,41 @@ validBeforeDeadline deadline =
 checkConstraints :: TxConstraints ParallelAuctionInput ParallelAuctionState -> ScriptContext -> Bool
 checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionState
 
--- TODO Checks:
--- - Ensure one input
+{-# INLINEABLE traceWithIfNothing' #-}
+traceWithIfNothing' s = \case
+  Nothing -> trace s Nothing
+  Just v -> pure v
+
+{-# INLINEABLE traceWithIfFalse' #-}
+traceWithIfFalse' s v = if not v then trace s Nothing else pure ()
+
 -- - Ensure input contains correct token
 -- - Only one output
 -- - Output goes back to script
 -- - Output contains token
 {-# INLINEABLE validateNewBid #-}
 validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
-validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo, scriptContextPurpose = Spending txOutRef} curBid newBid =
-  -- Make failsafe
-  let [TxOut {txOutValue}] = getContinuingOutputs ctx
-      (_, threadTokenMaybe) = splitNativeAndThreadToken txOutValue
-   in case threadTokenMaybe of
-        Nothing ->
-          trace "Required values could not be computed" False
-        Just threadToken ->
-          traceIfFalse
-            "New bid is not higher"
-            (checkNewBidIsHigher curBid newBid)
-            -- Check tx constraints
-            && traceIfFalse
-              "Auction is not open anymore"
-              (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
-            && traceIfFalse
-              "New bid does not pay back old bidder"
-              (checkConstraints (mustPayBackBid curBid) ctx)
-            && traceIfFalse
-              "New bid does not pay back old bidder"
-              (checkConstraints (mustUseThreadTokenAndPayBid txOutRef threadToken newBid) ctx)
+validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo, scriptContextPurpose = Spending txOutRef} curBid newBid = isJust $ do
+  TxOut {txOutValue} <- traceWithIfNothing'
+    "More than one continuing output"
+    $ case getContinuingOutputs ctx of
+      [t] -> Just t
+      _ -> Nothing
+  threadToken <-
+    traceWithIfNothing' "Failed to extract thread token" $ extractThreadToken txOutValue
+  traceWithIfFalse'
+    "New bid is not higher"
+    (checkNewBidIsHigher curBid newBid)
+  -- Check tx constraints
+  traceWithIfFalse'
+    "Auction is not open anymore"
+    (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
+  traceWithIfFalse'
+    "New bid does not pay back old bidder"
+    (checkConstraints (mustPayBackBid curBid) ctx)
+  traceWithIfFalse'
+    "New bid does not pay back old bidder"
+    (checkConstraints (mustUseThreadTokenAndPayBid txOutRef threadToken newBid) ctx)
 
 {-# INLINEABLE validateCloseBiddingThread #-}
 validateCloseBiddingThread :: ParallelAuctionParams -> ScriptContext -> Bid -> Bool
