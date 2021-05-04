@@ -63,6 +63,7 @@ import qualified Plutus.Contracts.Currency as Currency
 import qualified Plutus.V1.Ledger.Interval as Interval
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
+import qualified PlutusTx.Builtins
 import PlutusTx.AssocMap as AssocMap
 import PlutusTx.Prelude
   ( AdditiveGroup ((-)),
@@ -94,7 +95,7 @@ import PlutusTx.Prelude
     ($),
     (&&),
     (.),
-    (<$>),
+    (<$>), String
   )
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
@@ -233,6 +234,10 @@ extractThreadToken = snd . splitNativeAndThreadToken
 closeRedeemer :: Redeemer
 closeRedeemer = Redeemer $ PlutusTx.toData InputClose
 
+{-# INLINEABLE checkNewBidIsHigher #-}
+checkNewBidIsHigher :: Bid -> Bid -> Bool
+checkNewBidIsHigher (Bid curBid _) (Bid newBid _) = curBid < newBid
+
 {-# INLINEABLE mustDistributeThreadTokensWithInitBid #-}
 mustDistributeThreadTokensWithInitBid :: Bid -> [Value] -> TxConstraints i ParallelAuctionState
 mustDistributeThreadTokensWithInitBid initialBid tokenValues =
@@ -265,6 +270,8 @@ mustUseThreadTokenAndPayBid :: TxOutRef -> Value -> Bid -> TxConstraints i Paral
 mustUseThreadTokenAndPayBid utxoBidRef threadToken bid =
   let inputBid = InputBid bid
       outputBid = Bidding bid
+      -- FIXME Combining values or paying twice to script is identical, i.e. only ONE UTxO is created
+      --   Expected?
       payToScript = threadToken <> Ada.toValue (bBid bid)
    in mustSpendScriptOutput utxoBidRef (Redeemer $ PlutusTx.toData inputBid)
         <> mustPayToTheScript outputBid payToScript
@@ -289,37 +296,43 @@ checkConstraints :: TxConstraints ParallelAuctionInput ParallelAuctionState -> S
 checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionState
 
 {-# INLINEABLE traceWithIfNothing' #-}
+traceWithIfNothing' :: PlutusTx.Builtins.String -> Maybe a -> Maybe a
 traceWithIfNothing' s = \case
   Nothing -> trace s Nothing
   Just v -> pure v
 
 {-# INLINEABLE traceWithIfFalse' #-}
+traceWithIfFalse' :: PlutusTx.Builtins.String -> Bool -> Maybe ()
 traceWithIfFalse' s v = if not v then trace s Nothing else pure ()
 
--- - Ensure input contains correct token
--- - Only one output
--- - Output goes back to script
--- - Output contains token
 {-# INLINEABLE validateNewBid #-}
 validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
 validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo, scriptContextPurpose = Spending txOutRef} curBid newBid = isJust $ do
+  -- Ensure new bid is higher than current
+  traceWithIfFalse'
+    "New bid is not higher"
+    (checkNewBidIsHigher curBid newBid)
+  -- Ensure there is one output which is continued
   TxOut {txOutValue} <- traceWithIfNothing'
     "More than one continuing output"
     $ case getContinuingOutputs ctx of
       [t] -> Just t
       _ -> Nothing
+  -- Ensure this output contains the bidding thread token
   threadToken <-
     traceWithIfNothing' "Failed to extract thread token" $ extractThreadToken txOutValue
-  traceWithIfFalse'
-    "New bid is not higher"
-    (checkNewBidIsHigher curBid newBid)
   -- Check tx constraints
+  -- Check if bid is happending before deadline
   traceWithIfFalse'
     "Auction is not open anymore"
     (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
+  -- Check if old bid is payed back
   traceWithIfFalse'
     "New bid does not pay back old bidder"
     (checkConstraints (mustPayBackBid curBid) ctx)
+  -- Check if new bid is payed to script
+  -- FIXME Constraints checks a little bit too much. In order to save some computation instructions
+  --   (and therefore costs), split constraint is smaller ones and reuse.
   traceWithIfFalse'
     "New bid does not pay back old bidder"
     (checkConstraints (mustUseThreadTokenAndPayBid txOutRef threadToken newBid) ctx)
@@ -348,6 +361,7 @@ validateCloseAuction params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
 -- - Spends asset to highest bidder
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
 validateIsClosingTx params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
+  -- TODO
   True
 
 {-# INLINEABLE mkValidator #-}
@@ -385,9 +399,6 @@ mkValidator params state input ctx =
 -- Highest bidder must get asset token
 -- Money must be transfered to original owner
 -- Money of not-highset bidders must be returned
-
-checkNewBidIsHigher :: Bid -> Bid -> Bool
-checkNewBidIsHigher (Bid curBid _) (Bid newBid _) = curBid < newBid
 
 data ParallelAuction
 
