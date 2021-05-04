@@ -11,7 +11,7 @@ Note: Heavily relies on source code in/from
 
 ## Test Case: Parallel Auction
 
-See [ParallelAuction](src/ParallelAuction.hs) for the implementation.
+See [src/ParallelAuction.hs](src/ParallelAuction.hs) for the implementation.
 Lacks probably still a lot of corner cases. Focus was rather to get a grip on all the data, the flow, a half-way nice style of coding, ... .
 
 Idea is to try out if bidding in an auction can be done in parallel by using different UTxOs if multiple bids should be placed within the same slot.
@@ -20,7 +20,7 @@ TODOs
 - Closing endpoint is not complete, since assumtion was that access to datum of input is given, but it is not.
 
 Using it:
-- Use [ParallelAuctionTrace](src/ParallelAuctionTrace.hs) in `cabal repl`
+- Use [src/ParallelAuctionTrace.hs](src/ParallelAuctionTrace.hs) in `cabal repl`
 - Run `testParallelBidding`, `testSequentialBidding` or `testSimpleBidding`
 
 
