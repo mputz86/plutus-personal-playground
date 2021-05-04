@@ -46,7 +46,6 @@ import Plutus.Contract
   ( AsContractError (_ContractError),
     BlockchainActions,
     Contract,
-    ContractError (OtherError),
     Endpoint,
     awaitTxConfirmed,
     endpoint,
@@ -63,10 +62,11 @@ import qualified Plutus.Contracts.Currency as Currency
 import qualified Plutus.V1.Ledger.Interval as Interval
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
-import qualified PlutusTx.Builtins
 import PlutusTx.AssocMap as AssocMap
+import qualified PlutusTx.Builtins
 import PlutusTx.Prelude
   ( AdditiveGroup ((-)),
+    AdditiveSemigroup ((+)),
     Applicative (pure),
     Bool (..),
     Eq ((==)),
@@ -83,7 +83,6 @@ import PlutusTx.Prelude
     fromMaybe,
     id,
     isJust,
-    length,
     mapM_,
     maximum,
     mconcat,
@@ -95,10 +94,11 @@ import PlutusTx.Prelude
     ($),
     (&&),
     (.),
-    (<$>), String
+    (<$>),
   )
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
+import Plutus.Contract.Types (ContractError)
 
 -- Parallel Auction, Idea
 --
@@ -107,7 +107,7 @@ import qualified Prelude as Haskell
 --   - These UTxOs are called (bidding) threads
 --   - The count of parallel threads is called thread count
 -- - Create a OneShotCurrency with as many coins as thread count
---   - These are called threadTokens
+--   - These are called thread tokens
 -- - Each of the bidding threads holds 1 thread token
 -- - Create another UTxO which holds the asset of the auction
 --
@@ -115,15 +115,16 @@ import qualified Prelude as Haskell
 -- - A bidder selects all currently know bidding threads
 -- - Checks if his own bid is higher than the highest
 -- - The bidder computes, based on his public key hash, a "random" UTxO to place his bid
--- - Note: It does not have to be the one with the highest bid
+--   - Maybe add current slot number, so that same bidder does not bid on same thread all the time
+-- - Note: Selected bidding thread does not have to be the one with the highest bid
 -- - The bidder gets the current bid on this thread, pays back the money to the original bidder
--- - The bidder places his own bid by spending this UTxO
+-- - The bidder places his own bid by spending the selected bidding thread UTxO
 -- - The newly created UTxO contains the bidder's bid and the "forwarded" thread token
 -- - This allows for parallel bids of at most the thread count
 --   - But only if the computed index for the same slot do not collide
 --
 -- Closing
--- - Anybody can close
+-- - Anybody can close (pays fees)
 -- - From all bidding threads, select the one with the highest bid
 -- - Pay back all other bidders
 -- - Transfer the asset from the hold UTxO to the highest bidder
@@ -177,7 +178,6 @@ instance Haskell.Ord Bid where
 
 PlutusTx.unstableMakeIsData ''Bid
 
--- FIXME Rename to ParallelAuctionState
 data ParallelAuctionState
   = -- | State which holds asset
     Hold
@@ -307,7 +307,7 @@ traceWithIfFalse' s v = if not v then trace s Nothing else pure ()
 
 {-# INLINEABLE validateNewBid #-}
 validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
-validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo, scriptContextPurpose = Spending txOutRef} curBid newBid = isJust $ do
+validateNewBid params ctx@ScriptContext {scriptContextPurpose = Spending txOutRef} curBid newBid = isJust $ do
   -- Ensure new bid is higher than current
   traceWithIfFalse'
     "New bid is not higher"
@@ -336,10 +336,13 @@ validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo, scriptCon
   traceWithIfFalse'
     "New bid does not pay back old bidder"
     (checkConstraints (mustUseThreadTokenAndPayBid txOutRef threadToken newBid) ctx)
+validateNewBid _ _ _ _ =
+  traceIfFalse "Wrong script purpose for new bid" False
 
 {-# INLINEABLE validateCloseBiddingThread #-}
-validateCloseBiddingThread :: ParallelAuctionParams -> ScriptContext -> Bid -> Bool
-validateCloseBiddingThread params ctx bid =
+validateCloseBiddingThread :: ParallelAuctionParams -> ScriptContext -> Bool
+validateCloseBiddingThread params ctx =
+  -- Check if bidding thread is consued by (valid) auction closing tx
   traceIfFalse
     "No valid closing transaction"
     (validateIsClosingTx params ctx)
@@ -347,22 +350,50 @@ validateCloseBiddingThread params ctx bid =
 
 {-# INLINEABLE validateCloseAuction #-}
 validateCloseAuction :: ParallelAuctionParams -> ScriptContext -> Bool
-validateCloseAuction params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
+validateCloseAuction params ctx =
+  -- Check if hold UTxO is consued by (valid) auction closing tx
   traceIfFalse
     "No valid closing transaction"
     (validateIsClosingTx params ctx)
     && trace "Closing auction" True
 
+-- | Counts how many inputs have state Hold.
+--   TODO Should be abstracted to check for any state. Reuse for bidding threads.
+--   FIXME Question @PlutusTeam : Should you be able to get Datum of inputs?
+--     Since the hashes seem to be there
+{-# INLINEABLE countHold #-}
+countHold :: TxInfo -> [TxInInfo] -> Integer
+countHold txInfo = go
+  where
+    go [] = 0
+    go (TxInInfo {txInInfoResolved = txOut} : is) = fromMaybe (go is) $ do
+      h <- txOutDatumHash txOut
+      -- FIXME Question @PlutusTeam : Is it supposed to be able to get Datum of inputs?
+      --   Does not work here
+      Datum d <- findDatum h txInfo
+      s <- PlutusTx.fromData @ParallelAuctionState d
+      case s of
+        Hold -> Just $ 1 + go is
+        _ -> Nothing
+
+-- | Used to validate if bidding threads and hold UTxO is consumed by auction closing tx.
+--   TODO A lot to do here
 {-# INLINEABLE validateIsClosingTx #-}
--- TODO Checks
--- - Closes all bidding threads
--- - Spends highest bid to owner
--- - Spends hold UTxO (only one)
--- - Spends asset to highest bidder
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
-validateIsClosingTx params ctx@ScriptContext {scriptContextTxInfo = txInfo} =
-  -- TODO
-  True
+validateIsClosingTx _ _ = isJust $ do
+  -- TODO Check: All bidding threads and hold UTxO are consumed
+  -- FIXME Fails due to datum for inputs not available, see 'countHold'
+  -- let is = txInfoInputs txInfo
+  --     holdCount = countHold txInfo (txInfoInputs txInfo)
+  -- traceWithIfFalse'
+  --    "Consumes not exactly 1 hold state"
+  --    $ holdCount == 1
+  -- TODO Check: Spends all bidding threads (goes to script; burning would be better)
+  -- TODO Check: Spends hold UTxO (only one; goes to script)
+  -- TODO Check: Spends asset to highest bidder
+  -- TODO Check: Spends highest bid to owner
+  -- TODO Check: Pays back any non-winning bids to owners
+  pure ()
 
 {-# INLINEABLE mkValidator #-}
 mkValidator ::
@@ -376,29 +407,13 @@ mkValidator params state input ctx =
     -- Transition within a bidding thread
     (Bidding curBid, InputBid newBid) -> validateNewBid params ctx curBid newBid
     -- Transition from bidding thread to closed auction
-    (Bidding curBid, InputClose) -> validateCloseBiddingThread params ctx curBid
+    (Bidding _, InputClose) -> validateCloseBiddingThread params ctx
     -- Transition from open auction to closed auction
     (Hold, InputClose) -> validateCloseAuction params ctx
     -- Not allowed transitions
     (Finished, _) ->
       trace "Invalid transition from state finished" False
     _ -> trace "Unknown transition" False
-
--- Check on transaction
--- - Must contain all (and only) inputs with thread token
--- - Must select the higheset bid
--- - Must pay back lower bids
--- - Must pay highest bid to offerer
--- - Must transfer asset to highest bidder
---
--- Collect all UTxO
--- Use only the UTxOs with a thread token
--- Must be spent, inputs to TX
--- Thread token must be burned in TX
--- Datums of all inputs must be used to compute highest bidder
--- Highest bidder must get asset token
--- Money must be transfered to original owner
--- Money of not-highset bidders must be returned
 
 data ParallelAuction
 
@@ -456,29 +471,20 @@ endpoints = (start' `select` bid' `select` close') >> endpoints
 -- | Starts an auction
 start :: ParallelAuctionParams -> ParallelAuctionContract ()
 start params = do
-  -- General values
   ownPkHash <- pubKeyHash <$> ownPubKey
-  -- Create bidding threads (UTxOs)
+  -- Create tokens for bidding threads
   threadTokenValues <- createBiddingThreads ownPkHash (pThreadCount params)
-  -- Create tx constraints
+  -- Create tx: One UTxO per bidding thread and one UTxO with asset
   let scrInst = inst params
       constraints =
         mustDistributeThreadTokensWithInitBid (Bid 0 ownPkHash) threadTokenValues
           <> mustPayAssetFromOwnerToScript (pAsset params)
   logI "Starting auction"
   ledgerTx <- submitTxConstraints scrInst constraints
+  logI'' "Waiting for tx confirmation" "ledger tx" (show ledgerTx)
   void . awaitTxConfirmed . txId $ ledgerTx
   -- Debug
   printUtxos' params
-
--- | Selects any of the existing thread UTxO for placing own bid by spending this UTxO.
-selectUtxoIndex :: PubKeyHash -> Integer -> Int
-selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
-
--- | Compares expected thread count with count of bidding UTxO threads.
-hasCorrectUtxoCount :: Integer -> Int -> Bool
-hasCorrectUtxoCount threadCount utxoCount =
-  fromIntegral threadCount Haskell.== utxoCount
 
 -- | Places bid
 bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
@@ -490,7 +496,7 @@ bid (params, bidAmount) = do
       ownBid = Bid (Ada.Lovelace bidAmount) ownPkHash
   logI' "Trying to place bid" [("pk hash", show ownPkHash), ("bid", show bidAmount)]
   utxoMap <- utxoAt scrAddr
-  let threadUtxoMap = filterBiddingUTxOs utxoMap
+  let threadUtxoMap = filterBiddingThreadUTxOs utxoMap
   -- Check if thread UTxOs and expected thread count match
   failWithIfFalse
     ( CheckError $
@@ -541,6 +547,7 @@ bid (params, bidAmount) = do
           <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
+  logI'' "Waiting for tx confirmation" "ledger tx" (show ledgerTx)
   void . awaitTxConfirmed . txId $ ledgerTx
 
   -- Print UTxO
@@ -558,8 +565,8 @@ close params = do
   utxoMap <- utxoAt scrAddr
   -- Debug
   printUtxos' params
-  -- Filter for utxo with bidding state
-  let threadUtxoMap = filterBiddingUTxOs utxoMap
+  -- Filter for UTxOs with bidding state
+  let threadUtxoMap = filterBiddingThreadUTxOs utxoMap
   -- Check if thread UTxOs and expected thread count match
   failWithIfFalse
     ( CheckError $
@@ -613,7 +620,7 @@ close params = do
           <> mustReturnThreadTokens threadTokensValue
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
-  logI "Waiting for tx confirmation"
+  logI'' "Waiting for tx confirmation" "ledger tx" (show ledgerTx)
   void . awaitTxConfirmed . txId $ ledgerTx
   -- Debug
   printUtxos' params
@@ -624,8 +631,10 @@ close params = do
       let Just txOut = Map.lookup utxoRef utxoMap
           -- FIXME Unsafe
           Just b = txOutTxToBid txOut
+          -- Filter out 0 bids
+          pb = if bBid b == 0 then mempty else mustPayBackBid b
        in mustSpendScriptOutput utxoRef closeRedeemer
-            <> mustPayBackBid b
+            <> pb
 
 -- Helper
 createBiddingThreads ::
@@ -652,11 +661,20 @@ findMaxUTxORef utxoMap = do
         GT -> Just (ref, txOut, aref : arefs)
         _ -> Just (aref, aTxOut, ref : arefs)
 
-txOutTxToBid :: TxOutTx -> Maybe Bid
-txOutTxToBid o = txOutTxDatum o >>= datumToBid
+-- | Selects any of the existing thread UTxO for placing own bid by spending this UTxO.
+selectUtxoIndex :: PubKeyHash -> Integer -> Int
+selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
 
-datumToBid :: Datum -> Maybe Bid
-datumToBid (Datum d) =
+-- | Compares expected thread count with count of bidding UTxO threads.
+hasCorrectUtxoCount :: Integer -> Int -> Bool
+hasCorrectUtxoCount threadCount utxoCount =
+  fromIntegral threadCount Haskell.== utxoCount
+
+txOutTxToBid :: TxOutTx -> Maybe Bid
+txOutTxToBid o = txOutTxDatum o >>= datumToBidInBidding
+
+datumToBidInBidding :: Datum -> Maybe Bid
+datumToBidInBidding (Datum d) =
   PlutusTx.fromData @ParallelAuctionState d >>= selectBidInBidding
 
 datumToHold :: Datum -> Maybe Bool
@@ -677,14 +695,14 @@ highestBidInUTxOs utxoMap = do
     ( folded
         . Control.Lens.to txOutTxDatum
         . _Just
-        . Control.Lens.to datumToBid
+        . Control.Lens.to datumToBidInBidding
         . _Just
     )
     Haskell.compare
     utxoMap
 
-filterBiddingUTxOs :: UtxoMap -> UtxoMap
-filterBiddingUTxOs utxoMap =
+filterBiddingThreadUTxOs :: UtxoMap -> UtxoMap
+filterBiddingThreadUTxOs utxoMap =
   Map.fromList $
     Map.toList utxoMap
       ^.. folded
@@ -692,7 +710,7 @@ filterBiddingUTxOs utxoMap =
           ( _2
               . Control.Lens.to txOutTxDatum
               . _Just
-              . Control.Lens.to datumToBid
+              . Control.Lens.to datumToBidInBidding
               . _Just
           )
 
