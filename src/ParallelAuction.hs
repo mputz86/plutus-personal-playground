@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -62,7 +63,7 @@ import qualified Plutus.Contracts.Currency as Currency
 import qualified Plutus.V1.Ledger.Interval as Interval
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
-import PlutusTx.AssocMap as AssocMap (delete, lookup, singleton)
+import PlutusTx.AssocMap as AssocMap
 import PlutusTx.Prelude
   ( AdditiveGroup ((-)),
     Applicative (pure),
@@ -73,6 +74,7 @@ import PlutusTx.Prelude
     Integer,
     Integral (mod),
     Maybe (..),
+    Monoid (mempty),
     Ord (compare, (<)),
     Ordering (EQ, GT),
     Show (show),
@@ -84,12 +86,12 @@ import PlutusTx.Prelude
     maximum,
     mconcat,
     replicate,
+    snd,
     trace,
     traceIfFalse,
     ($),
     (&&),
     (.),
-    (/=),
     (<$>),
   )
 import Prelude (Semigroup (..))
@@ -132,6 +134,12 @@ import qualified Prelude as Haskell
 -- - Ensure parallel bidding is working
 -- - Ensure selecting highest bid on close is working
 -- - ...
+--
+-- Idea / To Clarify:
+-- - Required to "know" the currency symbol of the newly created currency for the tokens within the contract requests (i.e. bidding)?
+--   - To ensure the right token is consumed and spent?
+--   - Probably not as long as we check that the UTxO comes from the script
+--   - Does not checking in Contract allow attackers to "infiltrate" invalid UTxOs in the list of honest bidders? I.e. their contracts fail due to a mismatching bidding thread UTxO count)
 --
 
 data ParallelAuctionParams = ParallelAuctionParams
@@ -186,6 +194,42 @@ data ParallelAuctionInput
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
+-- | Turns a zero value into a Nothing.
+{-# INLINEABLE getNonZeroValue #-}
+getNonZeroValue :: Value -> Maybe Value
+getNonZeroValue v = if Value.isZero v then Nothing else Just v
+
+-- | Split value into native and other currencies
+{-# INLINEABLE splitNativeAndOthers #-}
+splitNativeAndOthers :: Value -> (Maybe Value, Maybe Value)
+splitNativeAndOthers (Value.Value x) =
+  let native =
+        Value.Value . AssocMap.singleton Ada.adaSymbol
+          <$> AssocMap.lookup Ada.adaSymbol x
+      tokens = getNonZeroValue . Value.Value $ AssocMap.delete Ada.adaSymbol x
+   in (native, tokens)
+
+{-# INLINEABLE splitNativeAndThreadToken #-}
+splitNativeAndThreadToken :: Value -> (Maybe Value, Maybe Value)
+splitNativeAndThreadToken v =
+  let (native, others) = splitNativeAndOthers v
+      token = do
+        os <- others
+        case Value.flattenValue os of
+          [(cs, tn, a)] | a == 1 -> Just $ Value.singleton cs tn 1
+          -- Fail because of: No token, wrong amount of single token or too many tokens
+          _ -> Nothing
+   in (native, token)
+
+{-# INLINEABLE extractThreadToken #-}
+extractThreadToken :: Value -> Maybe Value
+extractThreadToken = snd . splitNativeAndThreadToken
+
+-- | Untyped redeemer for 'InputClose' input.
+{-# INLINEABLE closeRedeemer #-}
+closeRedeemer :: Redeemer
+closeRedeemer = Redeemer $ PlutusTx.toData InputClose
+
 {-# INLINEABLE mustDistributeThreadTokensWithInitBid #-}
 mustDistributeThreadTokensWithInitBid :: Bid -> [Value] -> TxConstraints i ParallelAuctionState
 mustDistributeThreadTokensWithInitBid initialBid tokenValues =
@@ -194,11 +238,6 @@ mustDistributeThreadTokensWithInitBid initialBid tokenValues =
 {-# INLINEABLE mustPayAssetFromOwnerToScript #-}
 mustPayAssetFromOwnerToScript :: Value -> TxConstraints i ParallelAuctionState
 mustPayAssetFromOwnerToScript = mustPayToTheScript Hold
-
--- | Untyped redeemer for 'InputClose' input.
-{-# INLINEABLE closeRedeemer #-}
-closeRedeemer :: Redeemer
-closeRedeemer = Redeemer $ PlutusTx.toData InputClose
 
 {-# INLINEABLE mustPayOwner #-}
 mustPayOwner :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
@@ -254,16 +293,27 @@ checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionStat
 -- - Output contains token
 {-# INLINEABLE validateNewBid #-}
 validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
-validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo} curBid newBid =
-  traceIfFalse
-    "New bid is not higher"
-    (checkNewBidIsHigher curBid newBid)
-    && traceIfFalse
-      "Auction is not open anymore"
-      (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
-    && traceIfFalse
-      "Bid is not valid thread continuation"
-      (checkIsBiddingThread ctx)
+validateNewBid params ctx@ScriptContext {scriptContextTxInfo = txInfo, scriptContextPurpose = Spending txOutRef} curBid newBid =
+  -- Make failsafe
+  let [TxOut {txOutValue}] = getContinuingOutputs ctx
+      (_, threadTokenMaybe) = splitNativeAndThreadToken txOutValue
+   in case threadTokenMaybe of
+        Nothing ->
+          trace "Required values could not be computed" False
+        Just threadToken ->
+          traceIfFalse
+            "New bid is not higher"
+            (checkNewBidIsHigher curBid newBid)
+            -- Check tx constraints
+            && traceIfFalse
+              "Auction is not open anymore"
+              (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
+            && traceIfFalse
+              "New bid does not pay back old bidder"
+              (checkConstraints (mustPayBackBid curBid) ctx)
+            && traceIfFalse
+              "New bid does not pay back old bidder"
+              (checkConstraints (mustUseThreadTokenAndPayBid txOutRef threadToken newBid) ctx)
 
 {-# INLINEABLE validateCloseBiddingThread #-}
 validateCloseBiddingThread :: ParallelAuctionParams -> ScriptContext -> Bid -> Bool
@@ -330,13 +380,6 @@ mkValidator params state input ctx =
 checkNewBidIsHigher :: Bid -> Bid -> Bool
 checkNewBidIsHigher (Bid curBid _) (Bid newBid _) = curBid < newBid
 
-checkIsBiddingThread :: ScriptContext -> Bool
-checkIsBiddingThread ctx =
-  let os = getContinuingOutputs ctx
-   in case os of
-        [_] -> True
-        _ -> length os == 1
-
 data ParallelAuction
 
 instance Scripts.ScriptType ParallelAuction where
@@ -395,11 +438,11 @@ start :: ParallelAuctionParams -> ParallelAuctionContract ()
 start params = do
   -- General values
   ownPkHash <- pubKeyHash <$> ownPubKey
-  let scrInst = inst params
   -- Create bidding threads (UTxOs)
   threadTokenValues <- createBiddingThreads ownPkHash (pThreadCount params)
   -- Create tx constraints
-  let constraints =
+  let scrInst = inst params
+      constraints =
         mustDistributeThreadTokensWithInitBid (Bid 0 ownPkHash) threadTokenValues
           <> mustPayAssetFromOwnerToScript (pAsset params)
   logI "Starting auction"
@@ -411,10 +454,6 @@ start params = do
 -- | Selects any of the existing thread UTxO for placing own bid by spending this UTxO.
 selectUtxoIndex :: PubKeyHash -> Integer -> Int
 selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
-
--- | Assuming thread token
-extractThreadToken :: Value -> Value
-extractThreadToken (Value.Value x) = Value.Value $ AssocMap.delete Ada.adaSymbol x
 
 -- | Compares expected thread count with count of bidding UTxO threads.
 hasCorrectUtxoCount :: Integer -> Int -> Bool
@@ -454,13 +493,23 @@ bid (params, bidAmount) = do
   let utxoIndex = selectUtxoIndex ownPkHash (pThreadCount params)
       -- Note: Unsafe, but checked that threadUtxoMap is equal to thread count
       (utxoBidRef, txOut) = utxoIndex `Map.elemAt` threadUtxoMap
-      threadToken = extractThreadToken $ txOutTxOut txOut ^. outValue
+      (_, threadTokenMaybe) = splitNativeAndThreadToken $ txOutTxOut txOut ^. outValue
       -- Note: This is the bid on the current thread and therefore not necessarily the highest bid (of all currently known UTxOs).
-      Just oldThreadBid = txOutTxToBid txOut
+      oldThreadBidMaybe = txOutTxToBid txOut
+  threadToken <-
+    failWithIfNothing
+      (CheckError "No thread token found in bidding thread")
+      threadTokenMaybe
+  oldThreadBid <-
+    failWithIfNothing
+      (CheckError "No old bid found in bidding thread")
+      oldThreadBidMaybe
   logI'
     "Placing bid"
     [ ("bidding UTxO thread index", show utxoIndex),
-      ("highest bid", show highestBid)
+      ("highest bid", show highestBid),
+      ("thread token", show threadToken),
+      ("old bid", show oldThreadBid)
     ]
   let lookups =
         Constraints.unspentOutputs utxoMap
@@ -513,17 +562,22 @@ close params = do
       wbid <- txOutTxToBid woref
       pure (woref, wbid)
   let winningTxOutValue = txOutTxOut winningTxOut ^. outValue
-      -- FIXME: May fail if multiple thread tokens / non-Ada tokens are found
-      threadTokenValue = extractThreadToken winningTxOutValue
-      threadTokensValue = Value.scale (pThreadCount params) threadTokenValue
-      -- FIXME: May fail if multiple hold states
-      -- TODO How to prevent that anybody places an UTxO with a Hold state?
-      --   => Must ensure that Hold state comes from own script
-      [holdUtxoRef] = Map.keys $ filterHoldUTxOs utxoMap
+      threadTokenMaybe = extractThreadToken winningTxOutValue
+  threadToken <-
+    failWithIfNothing
+      (CheckError "No thread token found in winner bidding thread")
+      threadTokenMaybe
+  let threadTokensValue = Value.scale (pThreadCount params) threadToken
+      holdUtxoRefs = Map.keys $ filterHoldUTxOs utxoMap
+  holdUtxoRef <-
+    case holdUtxoRefs of
+      [r] -> pure r
+      [] -> throwError . CheckError $ "No hold UTxO found"
+      _ -> throwError . CheckError $ "Too many hold UTxOs found"
   logI'
     "Closing auction"
     [ ("highest bid", show highestBid),
-      ("thread token", show threadTokenValue)
+      ("thread token", show threadToken)
     ]
   let lookups =
         Constraints.unspentOutputs utxoMap
