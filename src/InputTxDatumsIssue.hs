@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
@@ -18,6 +19,8 @@
 module InputTxDatumsIssue where
 
 import Control.Lens
+import Data.Text.Prettyprint.Doc (Pretty (..), defaultLayoutOptions, layoutPretty)
+import Data.Text.Prettyprint.Doc.Render.String (renderString)
 import Control.Monad hiding (fmap)
 import qualified Control.Monad.Freer.Extras as Extras
 import Data.Aeson (FromJSON, ToJSON)
@@ -34,6 +37,15 @@ import PlutusTx.Prelude hiding (Semigroup (..), unless)
 import qualified Wallet.Emulator.Wallet as Wallet
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
+import Wallet.Emulator
+import Wallet.Emulator.MultiAgent
+import Plutus.Trace.Emulator.Types
+import qualified Data.Aeson as A
+import Data.Text.Prettyprint.Doc.Extras
+import Plutus.Trace
+import Data.Default ( Default(def) )
+import Data.Aeson.Encode.Pretty (encodePretty)
+import Data.ByteString.Lazy.Char8 (unpack)
 
 -- | Play around with tx input datum in validator / on-chain.
 --   Especially the 'countState' function is of interest.
@@ -151,7 +163,7 @@ close = do
           <> mustIncludeDatum (Datum $ PlutusTx.toData StateB)
           <> mustPayToTheScript Final mempty
   ledgerTx <- submitTxConstraintsWith lookups constraints
-  logI'' "Ledger tx" "ledger tx" $ show ledgerTx
+  logInfo ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
   printUTxODatums scrAddress
 
@@ -163,7 +175,7 @@ endpoints = (start' `select` close') >> endpoints
 
 -- | Tests
 test :: IO ()
-test = Emulator.runEmulatorTraceIO $ do
+test = Emulator.runEmulatorTraceIO' def {showEvent=testShowEvent} def $ do
   h1 <- Emulator.activateContractWallet w1 endpoints
   -- Starting
   Extras.logInfo @String $ "Start"
@@ -207,3 +219,17 @@ logI' t m = logInfo @Haskell.String $ t <> printKeyValues m
 
 logI'' :: Haskell.String -> Haskell.String -> Haskell.String -> Contract w s e ()
 logI'' t k v = logI' t [(k, v)]
+
+testShowEvent :: EmulatorEvent' -> Maybe String
+testShowEvent = \case
+  UserThreadEvent (UserLog msg) -> Just $ "*** USER LOG: " <> msg
+  InstanceEvent (ContractInstanceLog (ContractLog json) _ _) -> Just $ "*** CONTRACT LOG: " <> unpack (encodePretty json)
+  InstanceEvent (ContractInstanceLog (StoppedWithError err) _ _) -> Just $ "*** CONTRACT STOPPED WITH ERROR: " <> show err
+  InstanceEvent (ContractInstanceLog NoRequestsHandled _ _) -> Nothing
+  InstanceEvent (ContractInstanceLog (HandledRequest _) _ _) -> Nothing
+  InstanceEvent (ContractInstanceLog (CurrentRequests _) _ _) -> Nothing
+  SchedulerEvent _ -> Nothing
+  ChainIndexEvent _ _ -> Nothing
+  WalletEvent _ _ -> Nothing
+  ev -> Just . renderString . layoutPretty defaultLayoutOptions . pretty $ ev
+
