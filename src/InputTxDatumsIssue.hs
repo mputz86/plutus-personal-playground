@@ -37,6 +37,13 @@ import qualified Prelude as Haskell
 
 -- | Play around with tx input datum in validator / on-chain.
 --   Especially the 'countState' function is of interest.
+--
+-- Solution:
+-- - Requires to add 'mustIncludeDatum' in the constraints
+-- - Datum is added to 'txInfoData' and can be used via 'findDatum'
+--
+-- - But: According to Lars, input datum of all spent UTxOs should be available "per default"
+--
 data InputTxDatumsState = StateA | StateB | Final
   deriving stock (Haskell.Eq, Haskell.Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -53,18 +60,18 @@ countState countStateF txInfo = go
       -- FIXME Cannot find datum for input
 
       -- 1. Working: Just check if there is a hash
-      Just $ 1 + go is
+      -- Just $ 1 + go is
 
       -- 2. Not Working: Check if findDatum finds datum for hash
       -- Datum d <- findDatum h txInfo
       -- Just $ 1 + go is
 
       -- 3. Not working, desired to check on state
-      -- Datum d <- findDatum h txInfo
-      -- s <- PlutusTx.fromData @InputTxDatumsState d
-      -- if countStateF s
-      --    then Just $ 1 + go is
-      --    else Nothing
+      Datum d <- findDatum h txInfo
+      s <- PlutusTx.fromData @InputTxDatumsState d
+      if countStateF s
+         then Just $ 1 + go is
+         else Nothing
 
 {-# INLINEABLE mkValidator #-}
 mkValidator :: InputTxDatumsState -> () -> ScriptContext -> Bool
@@ -137,8 +144,11 @@ close = do
       constraints =
         mustSpendScriptOutput oref1 unitRedeemer
           <> mustSpendScriptOutput oref2 unitRedeemer
+          <> mustIncludeDatum (Datum $ PlutusTx.toData StateA)
+          <> mustIncludeDatum (Datum $ PlutusTx.toData StateB)
           <> mustPayToTheScript Final mempty
   ledgerTx <- submitTxConstraintsWith lookups constraints
+  logI'' "Ledger tx" "ledger tx" $ show ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
   printUTxODatums scrAddress
 
