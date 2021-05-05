@@ -57,12 +57,14 @@ countState countStateF txInfo = go
     go [] = 0
     go (TxInInfo {txInInfoResolved = txOut} : is) = fromMaybe (go is) $ do
       h <- txOutDatumHash txOut
-      -- FIXME Cannot find datum for input
+      -- Issue: Cannot find datum for input
+      --   Solved by providing Datum via 'mustIncludeDatum' constraints
 
       -- 1. Working: Just check if there is a hash
       -- Just $ 1 + go is
 
       -- 2. Not Working: Check if findDatum finds datum for hash
+      --
       -- Datum d <- findDatum h txInfo
       -- Just $ 1 + go is
 
@@ -144,6 +146,7 @@ close = do
       constraints =
         mustSpendScriptOutput oref1 unitRedeemer
           <> mustSpendScriptOutput oref2 unitRedeemer
+          -- Note: In order to find datum of inputs, they must be added
           <> mustIncludeDatum (Datum $ PlutusTx.toData StateA)
           <> mustIncludeDatum (Datum $ PlutusTx.toData StateB)
           <> mustPayToTheScript Final mempty
