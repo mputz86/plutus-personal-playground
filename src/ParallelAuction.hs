@@ -36,6 +36,7 @@ import Ledger.Constraints as Constraints
     mustPayToPubKey,
     mustPayToTheScript,
     mustSpendScriptOutput,
+    mustIncludeDatum,
     mustValidateIn,
     otherScript,
     scriptInstanceLookups,
@@ -76,9 +77,10 @@ import PlutusTx.Prelude
     Integral (mod),
     Maybe (..),
     Monoid (mempty),
-    Ord (compare, (<)),
+    Ord (compare, (<), (<=)),
     Ordering (EQ, GT),
     Show (show),
+    const,
     fromIntegral,
     fromMaybe,
     id,
@@ -250,13 +252,15 @@ mustPayAssetFromOwnerToScript = mustPayToTheScript Hold
 {-# INLINEABLE mustPayOwner #-}
 mustPayOwner :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
 mustPayOwner params winningUtxoRef highestBid =
-  mustSpendScriptOutput winningUtxoRef (Redeemer $ PlutusTx.toData InputClose)
+  mustSpendScriptOutput winningUtxoRef closeRedeemer
     <> mustPayToPubKey (pOwner params) (Ada.toValue $ bBid highestBid)
 
 {-# INLINEABLE mustTransferAsset #-}
 mustTransferAsset :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
 mustTransferAsset params holdUtxoRef highestBid =
   mustSpendScriptOutput holdUtxoRef closeRedeemer
+    -- FIXME Workaround for missing input datum
+    <> mustIncludeDatum (Datum $ PlutusTx.toData Hold)
     <> mustPayToPubKey (bBidder highestBid) (pAsset params)
 
 -- | Returns thread tokens back to script.
@@ -361,33 +365,45 @@ validateCloseAuction params ctx =
 --   TODO Should be abstracted to check for any state. Reuse for bidding threads.
 --   FIXME Question @PlutusTeam : Should you be able to get Datum of inputs?
 --     Since the hashes seem to be there
-{-# INLINEABLE countHold #-}
-countHold :: TxInfo -> [TxInInfo] -> Integer
-countHold txInfo = go
+{-# INLINEABLE countState #-}
+countState :: (ParallelAuctionState -> Bool) -> TxInfo -> [TxInInfo] -> Integer
+countState stateCheckF txInfo = go
   where
     go [] = 0
-    go (TxInInfo {txInInfoResolved = txOut} : is) = fromMaybe (go is) $ do
+    go (TxInInfo {txInInfoResolved = txOut} : is) =
+        (if hasState txOut then 1 else 0) + go is
+    hasState txOut = fromMaybe False $ do
+      d <- getDatum txOut
+      pure $ stateCheckF d
+    getDatum txOut = do
       h <- txOutDatumHash txOut
-      -- FIXME Question @PlutusTeam : Is it supposed to be able to get Datum of inputs?
-      --   Does not work here
       Datum d <- findDatum h txInfo
-      s <- PlutusTx.fromData @ParallelAuctionState d
-      case s of
-        Hold -> Just $ 1 + go is
-        _ -> Nothing
+      PlutusTx.fromData @ParallelAuctionState d
+
+countHold = countState $ \case
+  Hold -> True
+  _ -> False
+
+countBidding = countState $ \case
+  Bidding _ -> True
+  _ -> False
 
 -- | Used to validate if bidding threads and hold UTxO is consumed by auction closing tx.
 --   TODO A lot to do here
 {-# INLINEABLE validateIsClosingTx #-}
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
-validateIsClosingTx _ _ = isJust $ do
+validateIsClosingTx params ScriptContext{scriptContextTxInfo=txInfo} = isJust $ do
   -- TODO Check: All bidding threads and hold UTxO are consumed
   -- FIXME Fails due to datum for inputs not available, see 'countHold'
-  -- let is = txInfoInputs txInfo
-  --     holdCount = countHold txInfo (txInfoInputs txInfo)
-  -- traceWithIfFalse'
-  --    "Consumes not exactly 1 hold state"
-  --    $ holdCount == 1
+  let is = txInfoInputs txInfo
+      holdCount = countHold txInfo (txInfoInputs txInfo)
+      biddingCount = countBidding txInfo (txInfoInputs txInfo)
+  traceWithIfFalse'
+     "Consumes not exactly 1 hold state"
+     $ holdCount == 1
+  traceWithIfFalse'
+     "Consumes not exactly as many bidding threads as threads"
+     $ biddingCount == pThreadCount params
   -- TODO Check: Spends all bidding threads (goes to script; burning would be better)
   -- TODO Check: Spends hold UTxO (only one; goes to script)
   -- TODO Check: Spends asset to highest bidder
@@ -481,7 +497,7 @@ start params = do
           <> mustPayAssetFromOwnerToScript (pAsset params)
   logI "Starting auction"
   ledgerTx <- submitTxConstraints scrInst constraints
-  logI'' "Waiting for tx confirmation" "ledger tx" (show ledgerTx)
+  -- logI'' "Waiting for tx confirmation" "ledger tx" ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
   -- Debug
   printUtxos' params
@@ -494,7 +510,11 @@ bid (params, bidAmount) = do
       scr = validator params
       scrAddr = scrAddress params
       ownBid = Bid (Ada.Lovelace bidAmount) ownPkHash
-  logI' "Trying to place bid" [("pk hash", show ownPkHash), ("bid", show bidAmount)]
+  logI'
+    "Trying to place bid"
+    [ "pk hash" .= ownPkHash,
+      "bid" .= bidAmount
+    ]
   utxoMap <- utxoAt scrAddr
   let threadUtxoMap = filterBiddingThreadUTxOs utxoMap
   -- Check if thread UTxOs and expected thread count match
@@ -502,8 +522,8 @@ bid (params, bidAmount) = do
     ( CheckError $
         toLogT
           "Failed since wrong thread UTxO count"
-          [ ("thread count", show $ pThreadCount params),
-            ("utxo count", show $ Map.size threadUtxoMap)
+          [ "thread count" .= pThreadCount params,
+            "utxo count" .= Map.size threadUtxoMap
           ]
     )
     (hasCorrectUtxoCount (pThreadCount params) (Map.size threadUtxoMap))
@@ -532,10 +552,10 @@ bid (params, bidAmount) = do
       oldThreadBidMaybe
   logI'
     "Placing bid"
-    [ ("bidding UTxO thread index", show utxoIndex),
-      ("highest bid", show highestBid),
-      ("thread token", show threadToken),
-      ("old bid", show oldThreadBid)
+    [ "bidding UTxO thread index" .= utxoIndex,
+      "highest bid" .= highestBid,
+      "thread token" .= threadToken,
+      "old bid" .= oldThreadBid
     ]
   let lookups =
         Constraints.unspentOutputs utxoMap
@@ -547,7 +567,7 @@ bid (params, bidAmount) = do
           <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
-  logI'' "Waiting for tx confirmation" "ledger tx" (show ledgerTx)
+  -- logI'' "Waiting for tx confirmation" "ledger tx" ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
 
   -- Print UTxO
@@ -572,8 +592,8 @@ close params = do
     ( CheckError $
         toLogT
           "Failed since wrong thread UTxO count"
-          [ ("thread count", show $ pThreadCount params),
-            ("utxo count", show $ Map.size threadUtxoMap)
+          [ "thread count" .= pThreadCount params,
+            "utxo count" .= Map.size threadUtxoMap
           ]
     )
     (hasCorrectUtxoCount (pThreadCount params) (Map.size threadUtxoMap))
@@ -603,24 +623,27 @@ close params = do
       _ -> throwError . CheckError $ "Too many hold UTxOs found"
   logI'
     "Closing auction"
-    [ ("highest bid", show highestBid),
-      ("thread token", show threadToken)
+    [ "highest bid" .= highestBid,
+      "thread token" .= threadToken
     ]
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups scrInst
           <> Constraints.otherScript scr
       payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
+      Just d = txOutTxDatum winningTxOut
+      mustIncludeWinningDatum = mustIncludeDatum d
       constraints =
         validAfterDeadline (pEndTime params)
           -- FIXME Ugly
           <> payBacks
+          <> mustIncludeWinningDatum
           <> mustPayOwner params winningUtxoRef highestBid
           <> mustTransferAsset params holdUtxoRef highestBid
           <> mustReturnThreadTokens threadTokensValue
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
-  logI'' "Waiting for tx confirmation" "ledger tx" (show ledgerTx)
+  logInputs @ParallelAuctionState ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
   -- Debug
   printUtxos' params
@@ -631,9 +654,11 @@ close params = do
       let Just txOut = Map.lookup utxoRef utxoMap
           -- FIXME Unsafe
           Just b = txOutTxToBid txOut
-          -- Filter out 0 bids
-          pb = if bBid b == 0 then mempty else mustPayBackBid b
+          Just d = txOutTxDatum txOut
+          pb = mustPayBackBid b
        in mustSpendScriptOutput utxoRef closeRedeemer
+            -- FIXME Workaround for missing input datums
+            <> mustIncludeDatum d
             <> pb
 
 -- Helper
