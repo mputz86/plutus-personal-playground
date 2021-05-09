@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
@@ -5,7 +6,24 @@
 -- | Note: Heavily relies on Auction in `plutus-use-cases`.
 module ParallelAuctionTrace where
 
-import Control.Lens
+import Text.Pretty.Simple (pPrint, pString, pShow)
+import Text.Pretty.Simple
+import Data.Aeson.Encode.Pretty (encodePretty)
+import qualified Data.Aeson as Aeson
+import Data.Aeson ((.=))
+import qualified Data.Aeson.Text as Aeson
+import Data.ByteString.Lazy.Char8 (unpack)
+import Data.Text.Prettyprint.Doc (Pretty (..), annotate, defaultLayoutOptions, layoutPretty)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Encoding as LazyText
+import qualified Data.Text.Lazy.Builder as LazyText
+import Data.Text.Prettyprint.Doc.Render.String (renderString)
+import Prettyprinter.Render.Terminal
+import Wallet.Emulator
+import Wallet.Emulator.MultiAgent
+import Control.Lens hiding ((.=))
 import Control.Monad.Freer.Extras as Extras
 import Data.Default
 import Data.Functor (void)
@@ -14,12 +32,17 @@ import qualified Ledger.Value as Value
 import ParallelAuction
 import Plutus.Contract.Trace
 import Plutus.Trace.Emulator as Emulator
+import Plutus.Trace.Emulator.Types
+import LoggingUtil
 
 test :: EmulatorTrace () -> IO ()
-test = runEmulatorTraceIO' def emulatorConfig
+test = runEmulatorTraceIO' traceConfig emulatorConfig
 
 testSimpleBidding :: IO ()
 testSimpleBidding = test testTraceSimpleBidding
+
+testStartCloseBidding :: IO ()
+testStartCloseBidding = test testTraceStartCloseBidding
 
 testSequentialBidding :: IO ()
 testSequentialBidding = test testTraceSequentialBidding
@@ -32,6 +55,7 @@ w1 = Wallet 1
 w2 = Wallet 2
 w3 = Wallet 3
 w4 = Wallet 4
+w5 = Wallet 5
 
 walletPubKeyHash :: Wallet -> PubKeyHash
 walletPubKeyHash = pubKeyHash . walletPubKey
@@ -47,6 +71,9 @@ offeredToken :: Value
 offeredToken = Value.singleton "ffff" "token" 1
 
 -- | Pay the offered token to wallet 1 at initialisation.
+traceConfig :: TraceConfig
+traceConfig = def { showEvent = testShowEvent }
+
 emulatorConfig :: EmulatorConfig
 emulatorConfig =
   let d = defaultDist & ix w1 <>~ offeredToken
@@ -69,6 +96,17 @@ testTraceSimpleBidding = do
   -- FIXME Close with any wallet
   callEndpoint @"close" h1 auction
   s <- waitNSlots 1
+  Extras.logInfo $ "Exit" ++ show s
+
+testTraceStartCloseBidding :: EmulatorTrace ()
+testTraceStartCloseBidding = do
+  let auction = theAuction
+  h1 <- activateContractWallet w1 endpoints
+  h2 <- activateContractWallet w2 endpoints
+  -- Closing
+  void $ waitUntilSlot (pEndTime auction)
+  callEndpoint @"close" h2 auction
+  s <- void $ waitNSlots 1
   Extras.logInfo $ "Exit" ++ show s
 
 testTraceSequentialBidding :: EmulatorTrace ()
@@ -114,5 +152,6 @@ testTraceParallelBidding = do
   -- Closing
   void $ waitUntilSlot (pEndTime auction)
   callEndpoint @"close" h4 auction
-  s <- void $ waitNSlots 1
-  Extras.logInfo $ "Exit" ++ show s
+  void $ waitNSlots 1
+  Extras.logInfo @String "Exit"
+

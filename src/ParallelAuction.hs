@@ -19,13 +19,20 @@
 
 module ParallelAuction where
 
-import Control.Lens
+import Control.Lens hiding ((.=))
+import qualified Data.Set as Set
+import Data.Aeson.Encode.Pretty (encodePretty)
+import Text.Pretty.Simple (pPrint, pString, pShow)
 import Control.Monad hiding (fmap)
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson as Aeson (FromJSON, ToJSON, (.=))
+import qualified Data.Aeson as Aeson (object, Value(..))
+import qualified Data.Aeson.Types as Aeson
 import Data.Hashable (hash)
 import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Text as Text
+import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Encoding as LazyText
 import GHC.Generics (Generic)
 import Ledger hiding (singleton)
 import Ledger.Ada as Ada
@@ -101,6 +108,7 @@ import PlutusTx.Prelude
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
 import Plutus.Contract.Types (ContractError)
+import LoggingUtil
 
 -- Parallel Auction, Idea
 --
@@ -766,44 +774,5 @@ failWithIfNothing e = \case
   Just a -> pure a
   Nothing -> throwError e
 
--- Logging Helper
 printUtxos' :: ParallelAuctionParams -> ParallelAuctionContract ()
-printUtxos' = printUtxos . scrAddress
-
-printUtxos :: Ledger.Address -> ParallelAuctionContract ()
-printUtxos scrAddr = do
-  utxoMap <- utxoAt scrAddr
-  logI'' "UTxO count" "count" $ show (Map.size utxoMap)
-  let datums :: [(Value, ParallelAuctionState)] =
-        utxoMap
-          ^.. folded
-            . Control.Lens.to (\o -> (txOutValue $ txOutTxOut o,) <$> txOutTxDatum o)
-            . _Just
-            . Control.Lens.to (\(v, Datum d) -> (v,) <$> PlutusTx.fromData @ParallelAuctionState d)
-            . _Just
-  PlutusTx.Prelude.mapM_ (logI'' "UTxO datums" "datum") $ fmap show datums
-
-logUTxOSize :: Maybe Haskell.String -> UtxoMap -> Contract w s e ()
-logUTxOSize title utxoMap =
-  let t = fromMaybe "UTxO size of script" title
-   in logI'' t "size" $ show (Map.size utxoMap)
-
-toLogS :: Show a => Haskell.String -> [(Haskell.String, a)] -> Haskell.String
-toLogS t m = t <> printKeyValues m
-  where
-    printKeyValues [] = ""
-    printKeyValues m' = ": " <> List.intercalate ", " (fmap kvToString m')
-    kvToString (k, v) = k <> "=" <> show v
-
-toLogT :: Haskell.String -> [(Haskell.String, Haskell.String)] -> Text.Text
-toLogT t m = Text.pack $ toLogS t m
-
-logI :: Haskell.String -> Contract w s e ()
-logI = logInfo @Haskell.String
-
--- TODO (sometime): Replace value tuples with HList.
-logI' :: Haskell.String -> [(Haskell.String, Haskell.String)] -> Contract w s e ()
-logI' t m = logInfo $ toLogS t m
-
-logI'' :: Haskell.String -> Haskell.String -> Haskell.String -> Contract w s e ()
-logI'' t k v = logI' t [(k, v)]
+printUtxos' p = printUtxos @ParallelAuctionState $ scrAddress p
