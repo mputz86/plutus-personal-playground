@@ -229,7 +229,6 @@ splitNativeAndThreadToken v =
       token = do
         os <- others
         case Value.flattenValue os of
-          -- FIXME Note: On-Chain code compilation fails if matched directly on value 1
           [(cs, tn, a)] | a == 1 -> Just $ Value.singleton cs tn 1
           -- Fail because of: No token, wrong amount of single token or too many tokens
           _ -> Nothing
@@ -267,8 +266,6 @@ mustPayOwner params winningUtxoRef highestBid =
 mustTransferAsset :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
 mustTransferAsset params holdUtxoRef highestBid =
   mustSpendScriptOutput holdUtxoRef closeRedeemer
-    -- FIXME Workaround for missing input datum
-    <> mustIncludeDatum (Datum $ PlutusTx.toData Hold)
     <> mustPayToPubKey (bBidder highestBid) (pAsset params)
 
 -- | Returns thread tokens back to script.
@@ -369,10 +366,7 @@ validateCloseAuction params ctx =
     (validateIsClosingTx params ctx)
     && trace "Closing auction" True
 
--- | Counts how many inputs have state Hold.
---   TODO Should be abstracted to check for any state. Reuse for bidding threads.
---   FIXME Question @PlutusTeam : Should you be able to get Datum of inputs?
---     Since the hashes seem to be there
+-- | Counts how many inputs fulfill the predicate.
 {-# INLINEABLE countState #-}
 countState :: (ParallelAuctionState -> Bool) -> TxInfo -> [TxInInfo] -> Integer
 countState stateCheckF txInfo = go
@@ -401,8 +395,6 @@ countBidding = countState $ \case
 {-# INLINEABLE validateIsClosingTx #-}
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
 validateIsClosingTx params ScriptContext{scriptContextTxInfo=txInfo} = isJust $ do
-  -- TODO Check: All bidding threads and hold UTxO are consumed
-  -- FIXME Fails due to datum for inputs not available, see 'countHold'
   let is = txInfoInputs txInfo
       holdCount = countHold txInfo (txInfoInputs txInfo)
       biddingCount = countBidding txInfo (txInfoInputs txInfo)
@@ -639,16 +631,19 @@ close params = do
           <> Constraints.scriptInstanceLookups scrInst
           <> Constraints.otherScript scr
       payBacks = mconcat $ payBackBid threadUtxoMap <$> otherUtxoRefs
-      Just d = txOutTxDatum winningTxOut
-      mustIncludeWinningDatum = mustIncludeDatum d
+      payBackDatums = mconcat $ payBackBidDatums threadUtxoMap <$> otherUtxoRefs
+      Just mustIncludeWinningDatum = mustIncludeDatum <$> txOutTxDatum winningTxOut
       constraints =
         validAfterDeadline (pEndTime params)
           -- FIXME Ugly
           <> payBacks
-          <> mustIncludeWinningDatum
           <> mustPayOwner params winningUtxoRef highestBid
           <> mustTransferAsset params holdUtxoRef highestBid
           <> mustReturnThreadTokens threadTokensValue
+          -- FIXME Workaround for missing input datum
+          <> mustIncludeDatum (Datum $ PlutusTx.toData Hold)
+          <> mustIncludeWinningDatum
+          <> payBackDatums
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
   logInputs @ParallelAuctionState ledgerTx
@@ -665,9 +660,13 @@ close params = do
           Just d = txOutTxDatum txOut
           pb = mustPayBackBid b
        in mustSpendScriptOutput utxoRef closeRedeemer
-            -- FIXME Workaround for missing input datums
-            <> mustIncludeDatum d
             <> pb
+    payBackBidDatums utxoMap utxoRef =
+      -- FIXME Unsafe
+      let Just txOut = Map.lookup utxoRef utxoMap
+          -- FIXME Unsafe
+          Just d = txOutTxDatum txOut
+       in mustIncludeDatum d
 
 -- Helper
 createBiddingThreads ::
@@ -762,10 +761,6 @@ filterHoldUTxOs utxoMap =
           )
 
 -- General Helper
-safeMax :: Haskell.Ord a => [a] -> Maybe a
-safeMax [] = Nothing
-safeMax bs = Just $ maximum bs
-
 failWithIfFalse :: ParallelAuctionError -> Bool -> ParallelAuctionContract ()
 failWithIfFalse e c = if Haskell.not c then throwError e else pure ()
 
