@@ -24,7 +24,7 @@ module ParallelAuction where
 
 import Control.Lens hiding ((.=))
 import qualified Data.Set as Set
-import Data.Monoid (Last (..))
+import Data.Monoid (Last (..), First(..))
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Text.Pretty.Simple (pPrint, pString, pShow)
 import Control.Monad hiding (fmap)
@@ -294,13 +294,18 @@ biddingThreadCount UtxoAcc{..} = length otherBiddingUtxos + length highestBiddin
 mustHaveBiddingThreadCount :: UtxoAcc -> Integer -> Bool
 mustHaveBiddingThreadCount utxoAcc = (==) (biddingThreadCount utxoAcc)
 
+{-# INLINEABLE extractBid #-}
+extractBid :: ParallelAuctionState -> Maybe Bid
+extractBid = \case
+  Bidding b -> Just b
+  _ -> Nothing
+
 {-# INLINEABLE mustHaveHighestBid #-}
 mustHaveHighestBid :: UtxoAcc -> Maybe (TxOutRef, TxOut, ParallelAuctionState, Bid)
 mustHaveHighestBid UtxoAcc{highestBiddingUtxo} = do
   (r, o, s) <- highestBiddingUtxo
-  case s of
-    Bidding b -> Just (r, o, s, b)
-    _ -> Nothing
+  b <- extractBid s
+  pure (r, o, s, b)
 
 -- | Requires the new bid (first arg) to be higher.
 {-# INLINEABLE mustHaveHigherBid #-}
@@ -337,6 +342,10 @@ splitNativeAndThreadToken v =
 {-# INLINEABLE extractThreadToken #-}
 extractThreadToken :: Value -> Maybe Value
 extractThreadToken = snd . splitNativeAndThreadToken
+
+{-# INLINEABLE extractThreadToken' #-}
+extractThreadToken' :: TxOut -> Maybe Value
+extractThreadToken' = snd . splitNativeAndThreadToken . txOutValue
 
 -- | Untyped redeemer for 'InputClose' input.
 {-# INLINEABLE closeRedeemer #-}
@@ -619,27 +628,11 @@ bid (params@ParallelAuctionParams{..}, bidAmount) = do
   (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
       checkHighestBid utxoAcc
   checkOwnBidHighest ownBid highestBid
-
-  let highestBidTxOutValue = highestBidTxOut ^. outValue
-      threadTokenMaybe = extractThreadToken highestBidTxOutValue
   -- Select any bidding UTxO thread to place own bid
-  let utxoIndex = selectUtxoIndex ownPkHash pThreadCount
-      (utxoBidRef, txOut, oldBid) =
-        if utxoIndex Haskell.== 0 then (highestBidUtxoRef, highestBidTxOut, highestBidding)
-                          else otherBids List.!! (utxoIndex Haskell.- 1)
-      (_, threadTokenMaybe) = splitNativeAndThreadToken $ txOut ^. outValue
-      -- Note: This is the bid on the current thread and therefore not necessarily the highest bid (of all currently known UTxOs).
-      oldThreadBidding = oldBid
-  threadToken <-
-    failWithIfNothing
-      (CheckError "No thread token found in bidding thread")
-      threadTokenMaybe
-  oldThreadBid <-
-    failWithIfNothing
-      (CheckError "No old bid found in bidding thread")
-      $ case oldThreadBidding of
-          Bidding b -> Just b
-          _ -> Nothing
+  (utxoIndex, utxoBidRef, oldBidTxOut, oldThreadBidding) <-
+      checkSelectUtxoIndex utxoAcc ownPkHash
+  threadToken <- checkThreadToken oldBidTxOut
+  oldThreadBid <- checkOldThreadBid oldThreadBidding
   logI'
     "Placing bid"
     [ "bidding UTxO thread index" .= utxoIndex,
@@ -663,6 +656,18 @@ bid (params@ParallelAuctionParams{..}, bidAmount) = do
       failWithIfFalse
         (CheckError $ toLogT' "Failed since another bid is higher than own bid" ["own bid" .= ownBid, "highest bid" .= highestBid])
         (mustHaveHigherBid ownBid highestBid)
+    checkSelectUtxoIndex utxoAcc pkHash =
+        failWithIfNothing
+          (CheckError "Could not find an UTxO index to place bid")
+          $ selectUtxoAtIndex utxoAcc pkHash
+    checkThreadToken txOut =
+        failWithIfNothing
+          (CheckError "No thread token found in bidding thread")
+          $ extractThreadToken' txOut
+    checkOldThreadBid oldThreadBidding =
+        failWithIfNothing
+          (CheckError "No old bid found in bidding thread")
+          $ extractBid oldThreadBidding
 
 -- | Closes auction
 close :: ParallelAuctionParams -> ParallelAuctionContract ()
@@ -760,6 +765,18 @@ toSingleValues v = do
 -- | Selects any of the existing thread UTxO for placing own bid by spending this UTxO.
 selectUtxoIndex :: PubKeyHash -> Integer -> Int
 selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
+
+selectUtxoAtIndex :: UtxoAcc -> PubKeyHash -> Maybe (Int, TxOutRef, TxOut, ParallelAuctionState)
+selectUtxoAtIndex utxoAcc@UtxoAcc{..} pkHash =
+  let threadCount = biddingThreadCount utxoAcc
+      idx = selectUtxoIndex pkHash threadCount
+      -- Select either from other bidding threads or the highest
+      First utxo =
+          (First $ otherBiddingUtxos ^? ix idx) <>
+          (First highestBiddingUtxo)
+   in case utxo of
+        Just (r, o, s) -> Just (idx, r, o, s)
+        Nothing -> Nothing
 
 -- General Helper
 failWithIfFalse :: ParallelAuctionError -> Bool -> ParallelAuctionContract ()
