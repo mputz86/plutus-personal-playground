@@ -1,134 +1,99 @@
--- TODO Remove unused extensions
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
 module LoggingUtil where
 
--- TODO Remove unused imports
-import Control.Lens hiding ((.=))
-import Control.Monad hiding (fmap)
-import Control.Monad.Freer.Extras as Extras
-import Data.Aeson ((.=))
-import Data.List as List
-import Data.Aeson as Aeson (FromJSON, ToJSON, (.=))
+import Control.Lens (folded, to, (^..), _Just)
+import Data.Aeson (ToJSON, (.=))
 import qualified Data.Aeson as Aeson
-import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.Aeson.Text as Aeson
-import qualified Data.Aeson.Types as Aeson
-import Data.ByteString.Lazy.Char8 (pack, unpack)
-import Data.Default
-import Data.Functor (void)
+import Data.ByteString.Lazy.Char8 (pack)
 import qualified Data.HashMap.Strict as HashMap
-import Data.Hashable (hash)
-import qualified Data.List as List
+import Data.List as List
+  ( dropWhile,
+    dropWhileEnd,
+    filter,
+    takeWhile,
+  )
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import Data.String
+import Data.String (String)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Builder as LazyText
-import qualified Data.Text.Lazy.Encoding as LazyText
 import Data.Text.Prettyprint.Doc (Pretty (..), annotate, defaultLayoutOptions, layoutPretty)
 import Data.Text.Prettyprint.Doc.Render.String (renderString)
-import GHC.Generics (Generic)
 import Ledger
-import Ledger.Ada as Ada
-import Ledger.AddressMap (UtxoMap)
-import Ledger.Constraints as Constraints
-  ( TxConstraints,
-    checkScriptContext,
-    mustIncludeDatum,
-    mustPayToPubKey,
-    mustPayToTheScript,
-    mustSpendScriptOutput,
-    mustValidateIn,
-    otherScript,
-    scriptInstanceLookups,
-    unspentOutputs,
+  ( Address,
+    Datum (Datum),
+    Tx (txInputs),
+    TxIn (txInType),
+    TxInType (ConsumeScriptAddress),
+    TxOut (txOutValue),
+    TxOutTx (txOutTxOut),
+    txOutTxDatum,
   )
-import qualified Ledger.Typed.Scripts as Scripts
-import qualified Ledger.Value as Value
+import Ledger.AddressMap (UtxoMap)
 import Plutus.Contract as Contract
-  ( AsContractError (_ContractError),
-    BlockchainActions,
+  ( AsContractError,
     Contract,
-    Endpoint,
     HasBlockchainActions,
-    awaitTxConfirmed,
-    endpoint,
     logInfo,
-    ownPubKey,
-    select,
-    submitTxConstraints,
-    submitTxConstraintsWith,
-    throwError,
     utxoAt,
   )
-import Plutus.Contract.Trace
-import Plutus.Contract.Types (ContractError)
-import qualified Plutus.Contracts.Currency as Currency
-import Plutus.Trace.Emulator as Emulator
 import Plutus.Trace.Emulator.Types
-import qualified Plutus.V1.Ledger.Interval as Interval
-import qualified Plutus.V1.Ledger.Value as Value
+  ( ContractInstanceLog (ContractInstanceLog),
+    ContractInstanceMsg
+      ( ContractLog,
+        CurrentRequests,
+        HandledRequest,
+        NoRequestsHandled,
+        StoppedWithError
+      ),
+    UserThreadMsg (UserLog),
+  )
 import qualified PlutusTx
-import PlutusTx.AssocMap as AssocMap
-import qualified PlutusTx.Builtins
 import PlutusTx.Prelude
-  ( AdditiveGroup ((-)),
-    AdditiveSemigroup ((+)),
-    Applicative (pure),
-    Bool (..),
-    Eq ((==)),
+  ( Bool (..),
     Functor (fmap),
-    Int,
-    Integer,
-    Integral (mod),
     Maybe (..),
-    Monoid (mempty),
-    Ord (compare, (<), (<=)),
-    Ordering (EQ, GT),
-    Show (show),
-    const,
-    fromIntegral,
     fromMaybe,
-    id,
-    isJust,
-    mapM_,
-    maximum,
-    mconcat,
-    not,
-    replicate,
-    snd,
-    trace,
-    traceIfFalse,
     ($),
-    (&&),
     (.),
     (<$>),
   )
 import Prettyprinter (emptyDoc, line)
 import Prettyprinter.Render.Terminal
+  ( Color (Yellow),
+    bold,
+    color,
+    renderLazy,
+  )
 import Text.Pretty.Simple
-import Wallet.Emulator
+  ( OutputOptions (outputOptionsCompact),
+    defaultOutputOptionsDarkBg,
+    pShow,
+    pShowOpt,
+    pString,
+  )
+import Wallet.Emulator (EmulatorEvent')
 import Wallet.Emulator.MultiAgent
+  ( EmulatorEvent'
+      ( ChainIndexEvent,
+        InstanceEvent,
+        SchedulerEvent,
+        UserThreadEvent,
+        WalletEvent
+      ),
+  )
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
 
@@ -147,8 +112,8 @@ testShowEvent = \case
     let errMsg = List.takeWhile (Haskell./= ' ') err
         errP = List.filter (Haskell./= '\\') . dropWhile (Haskell./= '{') . dropWhileEnd (Haskell./= '}') $ err
      in case Aeson.decode @Aeson.Value . pack $ errP of
-      Just j -> Just . LazyText.unpack $ eventMetaData ("Contract " <> LazyText.pack errMsg) (Haskell.Right j)
-      Nothing -> Just . LazyText.unpack $ eventMetaData "Contract" (Haskell.Left $ "ERROR " <> errP)
+          Just j -> Just . LazyText.unpack $ eventMetaData ("Contract " <> LazyText.pack errMsg) (Haskell.Right j)
+          Nothing -> Just . LazyText.unpack $ eventMetaData "Contract" (Haskell.Left $ "ERROR " <> errP)
   InstanceEvent (ContractInstanceLog NoRequestsHandled _ _) -> Nothing
   InstanceEvent (ContractInstanceLog (HandledRequest _) _ _) -> Nothing
   InstanceEvent (ContractInstanceLog (CurrentRequests _) _ _) -> Nothing
@@ -163,8 +128,8 @@ testShowEvent = \case
       $ pShowOpt (defaultOutputOptionsDarkBg {outputOptionsCompact = True}) ev
   where
     eventMetaData :: LazyText.Text -> Haskell.Either String Aeson.Value -> LazyText.Text
-    eventMetaData t v =
-      case v of
+    eventMetaData t ev =
+      case ev of
         Haskell.Left s ->
           renderLazy . layoutPretty defaultLayoutOptions $
             annotateEventType t <> annotateTitle (LazyText.pack s)
@@ -178,8 +143,9 @@ testShowEvent = \case
     annotateTitle t = annotate (color Yellow <> bold) . pretty $ t
     jsonTitle (Aeson.Object m) = case HashMap.lookup "title" m of
       Just (Aeson.String s) -> annotateTitle s
-      Nothing -> emptyDoc
+      _ -> emptyDoc
     jsonTitle _ = emptyDoc
+
 --
 -- Contract Logging
 
@@ -229,10 +195,10 @@ toLogT t m = LazyText.toStrict . pShow $ toLogS t m
 
 toLogT' :: Text.Text -> [(Text.Text, Aeson.Value)] -> Text.Text
 toLogT' t m =
-    LazyText.toStrict
-        . LazyText.toLazyText
-        . Aeson.encodeToTextBuilder
-        $ toLogS t m
+  LazyText.toStrict
+    . LazyText.toLazyText
+    . Aeson.encodeToTextBuilder
+    $ toLogS t m
 
 logI :: Text.Text -> Contract w s e ()
 logI = Contract.logInfo

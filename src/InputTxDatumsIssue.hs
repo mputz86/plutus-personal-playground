@@ -1,10 +1,12 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -18,34 +20,89 @@
 
 module InputTxDatumsIssue where
 
-import Control.Lens
-import Data.Text.Prettyprint.Doc (Pretty (..), defaultLayoutOptions, layoutPretty)
-import Data.Text.Prettyprint.Doc.Render.String (renderString)
-import Control.Monad hiding (fmap)
+import Control.Lens ( (^..), _Just, to, folded )
+import Control.Monad ( Monad((>>)), void )
 import qualified Control.Monad.Freer.Extras as Extras
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Map as Map
+import Data.Aeson.Encode.Pretty (encodePretty)
+import Data.ByteString.Lazy.Char8 (unpack)
+import Data.Default (Default (def))
+import Data.Map as Map ( keys, size )
+import Data.Text.Prettyprint.Doc (defaultLayoutOptions, layoutPretty)
+import Data.Text.Prettyprint.Doc.Extras ( Pretty(pretty) )
+import Data.Text.Prettyprint.Doc.Render.String (renderString)
 import GHC.Generics (Generic)
-import Ledger hiding (singleton)
-import Ledger.AddressMap (UtxoMap)
+import Ledger
+    ( txOutTxDatum,
+      txId,
+      pubKeyHash,
+      scriptAddress,
+      findDatum,
+      TxOutTx(txOutTxOut),
+      Address,
+      Validator,
+      Datum(Datum),
+      TxInInfo(TxInInfo, txInInfoResolved),
+      TxInfo(txInfoInputs),
+      TxOut(txOutDatumHash, txOutValue),
+      ScriptContext(ScriptContext, scriptContextTxInfo),
+      Value,
+      PubKeyHash,
+      unitRedeemer )
 import Ledger.Constraints as Constraints
+    ( unspentOutputs,
+      scriptInstanceLookups,
+      otherScript,
+      mustSpendScriptOutput,
+      mustPayToTheScript,
+      mustIncludeDatum )
 import qualified Ledger.Typed.Scripts as Scripts
-import Plutus.Contract hiding (when)
+import Plutus.Contract
+    ( type (.\/),
+      BlockchainActions,
+      Endpoint,
+      Contract,
+      ContractError,
+      logInfo,
+      awaitTxConfirmed,
+      endpoint,
+      utxoAt,
+      submitTxConstraintsWith,
+      select )
+import Plutus.Trace ( TraceConfig(showEvent) )
 import qualified Plutus.Trace.Emulator as Emulator
+import Plutus.Trace.Emulator.Types
+    ( ContractInstanceLog(ContractInstanceLog),
+      ContractInstanceMsg(CurrentRequests, ContractLog, StoppedWithError,
+                          NoRequestsHandled, HandledRequest),
+      UserThreadMsg(UserLog) )
 import qualified PlutusTx
-import PlutusTx.Prelude hiding (Semigroup (..), unless)
+import PlutusTx.Prelude
+    ( Show(show),
+      Bool(..),
+      Integer,
+      Maybe(..),
+      IO,
+      (<$>),
+      (.),
+      ($),
+      traceIfFalse,
+      mconcat,
+      mapM_,
+      fromMaybe,
+      AdditiveSemigroup((+)),
+      Monoid(mempty),
+      Eq((==)),
+      Functor(fmap),
+      String,
+      (++) )
+import Wallet.Emulator ( EmulatorEvent' )
+import Wallet.Emulator.MultiAgent
+    ( EmulatorEvent'(WalletEvent, UserThreadEvent, InstanceEvent,
+                     SchedulerEvent, ChainIndexEvent) )
 import qualified Wallet.Emulator.Wallet as Wallet
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
-import Wallet.Emulator
-import Wallet.Emulator.MultiAgent
-import Plutus.Trace.Emulator.Types
-import qualified Data.Aeson as A
-import Data.Text.Prettyprint.Doc.Extras
-import Plutus.Trace
-import Data.Default ( Default(def) )
-import Data.Aeson.Encode.Pretty (encodePretty)
-import Data.ByteString.Lazy.Char8 (unpack)
 
 -- | Play around with tx input datum in validator / on-chain.
 --   Especially the 'countState' function is of interest.
@@ -55,7 +112,6 @@ import Data.ByteString.Lazy.Char8 (unpack)
 -- - Datum is added to 'txInfoData' and can be used via 'findDatum'
 --
 -- - But: According to Lars, input datum of all spent UTxOs should be available "per default"
---
 data InputTxDatumsState = StateA | StateB | Final
   deriving stock (Haskell.Eq, Haskell.Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -84,12 +140,12 @@ countState countStateF txInfo = go
       Datum d <- findDatum h txInfo
       s <- PlutusTx.fromData @InputTxDatumsState d
       if countStateF s
-         then Just $ 1 + go is
-         else Nothing
+        then Just $ 1 + go is
+        else Nothing
 
 {-# INLINEABLE mkValidator #-}
 mkValidator :: InputTxDatumsState -> () -> ScriptContext -> Bool
-mkValidator d _ ScriptContext {scriptContextTxInfo = txInfo} =
+mkValidator _ _ ScriptContext {scriptContextTxInfo = txInfo} =
   -- Checks that tx is spending all UTxO: I.e. one with StateA, one with StateB
   traceIfFalse
     "Not matchin state input UTxOs"
@@ -175,7 +231,7 @@ endpoints = (start' `select` close') >> endpoints
 
 -- | Tests
 test :: IO ()
-test = Emulator.runEmulatorTraceIO' def {showEvent=testShowEvent} def $ do
+test = Emulator.runEmulatorTraceIO' def {showEvent = testShowEvent} def $ do
   h1 <- Emulator.activateContractWallet w1 endpoints
   -- Starting
   Extras.logInfo @String $ "Start"
@@ -195,7 +251,7 @@ walletPubKeyHash = pubKeyHash . Wallet.walletPubKey
 -- | General helpers
 printUTxODatums :: Ledger.Address -> InputTxDatumsContract ()
 printUTxODatums scrAddr = do
-  utxoMap <- utxoAt $ scrAddr
+  utxoMap <- utxoAt scrAddr
   logI'' "UTxO count" "count" $ show (Map.size utxoMap)
   let datums :: [(Value, InputTxDatumsState)] =
         utxoMap
@@ -232,4 +288,3 @@ testShowEvent = \case
   ChainIndexEvent _ _ -> Nothing
   WalletEvent _ _ -> Nothing
   ev -> Just . renderString . layoutPretty defaultLayoutOptions . pretty $ ev
-

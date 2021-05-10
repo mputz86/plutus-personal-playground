@@ -13,7 +13,6 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-{-# OPTIONS_GHC -Wno-missing-signatures #-}
 
 module PayBackIssue where
 
@@ -30,11 +29,11 @@ import Ledger.Constraints as Constraints
 import qualified Ledger.Typed.Scripts as Scripts
 import Plutus.Contract hiding (when)
 import Plutus.V1.Ledger.Value
-import qualified Plutus.Contracts.Currency as Currency
+import Plutus.Contracts.Currency as Currency
 import qualified Plutus.Trace.Emulator as Emulator
 import qualified PlutusTx
 import qualified PlutusTx.AssocMap as AssocMap
-import PlutusTx.Prelude hiding (Semigroup (..), unless)
+import PlutusTx.Prelude hiding (Semigroup (..))
 import qualified Wallet.Emulator.Wallet as Wallet
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
@@ -221,7 +220,7 @@ datumToBid (Datum d) = do
 
 printUTxODatums :: Ledger.Address -> PayBackContract ()
 printUTxODatums scrAddr = do
-  utxoMap <- utxoAt $ scrAddr
+  utxoMap <- utxoAt scrAddr
   logI'' "UTxO count" "count" $ show (Map.size utxoMap)
   let datums :: [(Value, PayBackDatum)] =
         utxoMap

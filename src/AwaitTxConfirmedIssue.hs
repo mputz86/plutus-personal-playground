@@ -22,8 +22,8 @@ module AwaitTxConfirmedIssue where
 -- - Note: Transaction confirmation handling will change in future, so probably not worth to contribute
 --
 
-import Control.Monad hiding (fmap)
-import Data.Text (Text)
+import Control.Monad ( Monad((>>), return, (>>=)), void )
+import Data.Text ( Text )
 import Data.Void (Void)
 import Ledger
     ( ScriptContext,
@@ -83,8 +83,7 @@ mkPolicy _ =
   traceIfFalse "Validation error" False
 
 policy :: Scripts.MonetaryPolicy
-policy =
-  mkMonetaryPolicyScript
+policy = mkMonetaryPolicyScript
     $$(PlutusTx.compile [||Scripts.wrapMonetaryPolicy mkPolicy||])
 
 curSymbol :: CurrencySymbol
@@ -97,7 +96,7 @@ type SignedSchema =
 mint :: Integer -> Contract w SignedSchema Text ()
 mint amt = do
   let val = Value.singleton curSymbol "ABC" amt
-      lookups = Constraints.monetaryPolicy $ policy
+      lookups = Constraints.monetaryPolicy policy
       tx = Constraints.mustForgeValue val
   ledgerTx <- submitTxConstraintsWith @Void lookups tx
   withTimeoutLogging 2 $ do
