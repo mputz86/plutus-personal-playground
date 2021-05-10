@@ -280,9 +280,11 @@ accUtxos a@UtxoAccessor{..} =
         _ -> Nothing
 
 {-# INLINEABLE mustHaveOneHold #-}
-mustHaveOneHold :: UtxoAcc -> Bool
+mustHaveOneHold :: UtxoAcc -> Maybe (TxOutRef, TxOut, ParallelAuctionState)
 mustHaveOneHold UtxoAcc{..} =
-  1 == length holdUtxos
+ case holdUtxos of
+    [r] -> pure r
+    _ -> Nothing
 
 {-# INLINEABLE biddingThreadCount #-}
 biddingThreadCount :: UtxoAcc -> Integer
@@ -471,24 +473,37 @@ validateCloseAuction params ctx =
     && trace "Closing auction" True
 
 -- | Used to validate if bidding threads and hold UTxO is consumed by auction closing tx.
---   TODO A lot to do here
 {-# INLINEABLE validateIsClosingTx #-}
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
-validateIsClosingTx ParallelAuctionParams{..} ScriptContext{scriptContextTxInfo=txInfo} = isJust $ do
+validateIsClosingTx params@ParallelAuctionParams{..} ctx@ScriptContext{scriptContextTxInfo=txInfo} = isJust $ do
   let is = txInfoInputs txInfo
       utxoAccessor = newUtxoTxInfoAccessor txInfo
       utxoAcc@(UtxoAcc highestBid otherBids holdStates) = accUtxos @ParallelAuctionState utxoAccessor
-  traceWithIfFalse'
+  -- Tx construction check
+  (holdUtxoRef, _, _) <- traceWithIfNothing'
      "Consumes not exactly 1 hold state"
      $ mustHaveOneHold utxoAcc
   traceWithIfFalse'
      "Consumes not exactly as many bidding threads as threads"
      $ mustHaveBiddingThreadCount utxoAcc pThreadCount
-  -- TODO Check: Spends all bidding threads (goes to script; burning would be better)
-  -- TODO Check: Spends hold UTxO (only one; goes to script)
-  -- TODO Check: Spends asset to highest bidder
-  -- TODO Check: Spends highest bid to owner
-  -- TODO Check: Pays back any non-winning bids to owners
+  -- UTxO inputs check
+  (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
+     traceWithIfNothing'
+         "Failed to find highest bid"
+        $ mustHaveHighestBid utxoAcc
+  -- Tx constraints checks
+  traceWithIfFalse'
+     "Closing tx only allowed after deadline"
+     $ checkConstraints (validAfterDeadline pEndTime) ctx
+  traceWithIfFalse'
+     "Does not pay back other bids"
+     $ checkConstraints (mustPayBackOtherBids utxoAcc) ctx
+  traceWithIfFalse'
+     "Constraints check failed"
+     $ checkConstraints (mustPayOwner params highestBidUtxoRef highestBid
+          <> mustTransferAsset params holdUtxoRef highestBid
+          -- <> mustReturnThreadTokens threadTokensValue
+          ) ctx
   pure ()
 
 {-# INLINEABLE mkValidator #-}
@@ -642,13 +657,7 @@ bid (params@ParallelAuctionParams{..}, bidAmount) = do
           <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
-  -- logI'' "Waiting for tx confirmation" "ledger tx" ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
-
-  -- Print UTxO
-  logI "Printing for tx confirmation"
-  printUtxos' params
-  pure ()
   where
     checkOwnBidHighest ownBid highestBid =
       failWithIfFalse
@@ -667,10 +676,10 @@ close params@ParallelAuctionParams{..} = do
   printUtxos' params
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
-      utxoAcc@(UtxoAcc highestBid otherBids holdStates) = accUtxos utxoAccessor
+      utxoAcc@(UtxoAcc _ otherBids holdStates) = accUtxos utxoAccessor
   checkBiddingThreadCount utxoAcc pThreadCount
   -- Select winning UTxO
-  (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBidBid) <-
+  (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
       checkHighestBid utxoAcc
   let highestBidTxOutValue = highestBidTxOut ^. outValue
       threadTokenMaybe = extractThreadToken highestBidTxOutValue
@@ -682,7 +691,7 @@ close params@ParallelAuctionParams{..} = do
   (holdUtxoRef, _, _) <- checkHoldState utxoAcc
   logI'
     "Closing auction"
-    [ "highest bid" .= highestBidBid,
+    [ "highest bid" .= highestBid,
       "thread token" .= threadToken
     ]
   let lookups =
@@ -699,23 +708,19 @@ close params@ParallelAuctionParams{..} = do
       constraints =
         validAfterDeadline pEndTime
           <> mustPayBackOtherBids utxoAcc
-          <> mustPayOwner params highestBidUtxoRef highestBidBid
-          <> mustTransferAsset params holdUtxoRef highestBidBid
+          <> mustPayOwner params highestBidUtxoRef highestBid
+          <> mustTransferAsset params holdUtxoRef highestBid
           <> mustReturnThreadTokens threadTokensValue
           <> mustIncludeMissingInputDatums
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
   logInputs @ParallelAuctionState ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
-  -- Debug
-  printUtxos' params
-  pure ()
   where
-    checkHoldState UtxoAcc{..} =
-       case holdUtxos of
-          [r] -> pure r
-          [] -> throwError . CheckError $ "No hold UTxO found"
-          _ -> throwError . CheckError $ "Too many hold UTxOs found"
+    checkHoldState utxoAcc =
+      failWithIfNothing
+        ( CheckError "Failed to find exactly one hold state")
+        $ mustHaveOneHold utxoAcc
     mustIncludePayBackBidDatum a (oref, txOut, _) = fromMaybe mempty $ do
       dh <- txOutDatumHash txOut
       d <- lookupData a (oref, dh)
