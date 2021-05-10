@@ -105,15 +105,6 @@ import Ledger.Constraints as Constraints
     unspentOutputs,
   )
 import qualified Ledger.Typed.Scripts as Scripts
-import Utils.LoggingUtil
-  ( logI,
-    logI',
-    logInputs,
-    printUtxos,
-    toLogT,
-    toLogT',
-  )
-import Utils.UtxoUtil
 import Plutus.Contract
   ( AsContractError (_ContractError),
     BlockchainActions,
@@ -131,7 +122,7 @@ import Plutus.Contract
   )
 import Plutus.Contract.Types (ContractError)
 -- FIXME HLS fix: Comment for HLS to work
--- import Plutus.Contracts.Currency (AsCurrencyError (_CurrencyError), CurrencyError, forgeContract, forgedValue)
+import Plutus.Contracts.Currency (AsCurrencyError (_CurrencyError), CurrencyError, forgeContract, forgedValue)
 import qualified Plutus.V1.Ledger.Interval as Interval
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
@@ -168,6 +159,15 @@ import PlutusTx.Prelude
     (<$>),
     (==),
   )
+import Utils.LoggingUtil
+  ( logI,
+    logI',
+    logInputs,
+    printUtxos,
+    toLogT,
+    toLogT',
+  )
+import Utils.UtxoUtil
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
 
@@ -216,6 +216,7 @@ data ParallelAuctionState
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionState
 
+-- Inputs / Redeemer for progressing the auction
 data ParallelAuctionInput
   = InputBid Bid
   | InputClose
@@ -248,45 +249,20 @@ accumulateUtxos a@UtxoAccessor {..} =
           Just $ r {holdUtxos = (oref, txOut, h) : holdUtxos}
         Just b@(Bidding (Bid newBid _)) ->
           case highestBiddingUtxo of
+            -- No highest bid so far, set current bid as highest
             Nothing -> Just $ r {highestBiddingUtxo = Just (oref, txOut, b)}
+            -- Check if new bid replaces highest bid
             Just w@(_, _, Bidding (Bid curBid _))
               | curBid < newBid ->
                 Just $ r {highestBiddingUtxo = Just (oref, txOut, b), otherBiddingUtxos = w : otherBiddingUtxos}
+            -- Otherwise, just add bid to other bids
             _ -> Just $ r {otherBiddingUtxos = (oref, txOut, b) : otherBiddingUtxos}
         _ -> Nothing
 
-{-# INLINEABLE mustHaveOneHold #-}
-mustHaveOneHold :: ParallelAuctionUtxos -> Maybe (TxOutRef, TxOut, ParallelAuctionState)
-mustHaveOneHold ParallelAuctionUtxos {..} =
-  case holdUtxos of
-    [r] -> pure r
-    _ -> Nothing
-
-{-# INLINEABLE biddingThreadCount #-}
-biddingThreadCount :: ParallelAuctionUtxos -> Integer
-biddingThreadCount ParallelAuctionUtxos {..} = length otherBiddingUtxos + length highestBiddingUtxo
-
-{-# INLINEABLE mustHaveBiddingThreadCount #-}
-mustHaveBiddingThreadCount :: ParallelAuctionUtxos -> Integer -> Bool
-mustHaveBiddingThreadCount utxos = (==) (biddingThreadCount utxos)
-
-{-# INLINEABLE extractBid #-}
-extractBid :: ParallelAuctionState -> Maybe Bid
-extractBid = \case
-  Bidding b -> Just b
-  _ -> Nothing
-
-{-# INLINEABLE mustHaveHighestBid #-}
-mustHaveHighestBid :: ParallelAuctionUtxos -> Maybe (TxOutRef, TxOut, ParallelAuctionState, Bid)
-mustHaveHighestBid ParallelAuctionUtxos {highestBiddingUtxo} = do
-  (r, o, s) <- highestBiddingUtxo
-  b <- extractBid s
-  pure (r, o, s, b)
-
--- | Requires the new bid (first arg) to be higher
-{-# INLINEABLE mustHaveHigherBid #-}
-mustHaveHigherBid :: Bid -> Bid -> Bool
-mustHaveHigherBid (Bid newBid _) (Bid oldBid _) = oldBid < newBid
+-- | Untyped redeemer for 'InputClose' input.
+{-# INLINEABLE closeRedeemer #-}
+closeRedeemer :: Redeemer
+closeRedeemer = Redeemer $ PlutusTx.toData InputClose
 
 -- | Turns a zero value into a Nothing.
 {-# INLINEABLE getNonZeroValue #-}
@@ -323,10 +299,48 @@ extractThreadToken = snd . splitNativeAndThreadToken
 extractThreadToken' :: TxOut -> Maybe Value
 extractThreadToken' = snd . splitNativeAndThreadToken . txOutValue
 
--- | Untyped redeemer for 'InputClose' input.
-{-# INLINEABLE closeRedeemer #-}
-closeRedeemer :: Redeemer
-closeRedeemer = Redeemer $ PlutusTx.toData InputClose
+{-# INLINEABLE getBiddingThreadCount #-}
+getBiddingThreadCount :: ParallelAuctionUtxos -> Integer
+getBiddingThreadCount ParallelAuctionUtxos {..} = length otherBiddingUtxos + length highestBiddingUtxo
+
+{-# INLINEABLE extractSingleHold #-}
+extractSingleHold :: ParallelAuctionUtxos -> Maybe (TxOutRef, TxOut, ParallelAuctionState)
+extractSingleHold ParallelAuctionUtxos {..} =
+  case holdUtxos of
+    [r] -> pure r
+    _ -> Nothing
+
+{-# INLINEABLE extractBid #-}
+extractBid :: ParallelAuctionState -> Maybe Bid
+extractBid = \case
+  Bidding b -> Just b
+  _ -> Nothing
+
+{-# INLINEABLE extractHighestBid #-}
+extractHighestBid :: ParallelAuctionUtxos -> Maybe (TxOutRef, TxOut, ParallelAuctionState, Bid)
+extractHighestBid ParallelAuctionUtxos {highestBiddingUtxo} = do
+  (r, o, s) <- highestBiddingUtxo
+  b <- extractBid s
+  pure (r, o, s, b)
+
+{-# INLINEABLE checkHasBiddingThreadCount #-}
+checkHasBiddingThreadCount :: ParallelAuctionUtxos -> Integer -> Bool
+checkHasBiddingThreadCount utxos = (==) (getBiddingThreadCount utxos)
+
+-- | Requires the new bid (first arg) to be higher
+{-# INLINEABLE checkHasHigherBid #-}
+checkHasHigherBid :: Bid -> Bid -> Bool
+checkHasHigherBid (Bid newBid _) (Bid oldBid _) = oldBid < newBid
+
+{-# INLINEABLE mustBeValidAfterDeadline #-}
+mustBeValidAfterDeadline :: Slot -> TxConstraints i o
+mustBeValidAfterDeadline deadline = mustValidateIn (Interval.from deadline)
+
+{-# INLINEABLE mustBeValidBeforeDeadline #-}
+mustBeValidBeforeDeadline :: Slot -> TxConstraints i o
+mustBeValidBeforeDeadline deadline =
+  -- FIXME @Lars: Using (Enum.pred deadline) leads to failing on-chain code. Intended?
+  mustValidateIn (Interval.to $ deadline - 1)
 
 {-# INLINEABLE mustDistributeThreadTokensWithInitBid #-}
 mustDistributeThreadTokensWithInitBid :: Bid -> [Value] -> TxConstraints i ParallelAuctionState
@@ -382,16 +396,6 @@ mustPayBackOtherBids ParallelAuctionUtxos {..} =
         <> mustSpendScriptOutput oref closeRedeemer
     payBack _ = mempty
 
-{-# INLINEABLE validAfterDeadline #-}
-validAfterDeadline :: Slot -> TxConstraints i o
-validAfterDeadline deadline = mustValidateIn (Interval.from deadline)
-
-{-# INLINEABLE validBeforeDeadline #-}
-validBeforeDeadline :: Slot -> TxConstraints i o
-validBeforeDeadline deadline =
-  -- FIXME @Lars: Using (Enum.pred deadline) leads to failing on-chain code. Intended?
-  mustValidateIn (Interval.to $ deadline - 1)
-
 -- | Version of 'checkScriptContext' with fixed types for this contract.
 {-# INLINEABLE checkConstraints #-}
 checkConstraints :: TxConstraints ParallelAuctionInput ParallelAuctionState -> ScriptContext -> Bool
@@ -413,7 +417,7 @@ validateNewBid params ctx@ScriptContext {scriptContextPurpose = Spending txOutRe
   -- Ensure new bid is higher than current
   traceWithIfFalse'
     "New bid is not higher"
-    (mustHaveHigherBid newBid curBid)
+    (checkHasHigherBid newBid curBid)
   -- Ensure there is one output which is continued
   TxOut {txOutValue} <- traceWithIfNothing'
     "More than one continuing output"
@@ -427,7 +431,7 @@ validateNewBid params ctx@ScriptContext {scriptContextPurpose = Spending txOutRe
   -- Check if bid is happending before deadline
   traceWithIfFalse'
     "Auction is not open anymore"
-    (checkConstraints (validBeforeDeadline $ pEndTime params) ctx)
+    (checkConstraints (mustBeValidBeforeDeadline $ pEndTime params) ctx)
   -- Check if old bid is payed back
   traceWithIfFalse'
     "New bid does not pay back old bidder"
@@ -469,15 +473,15 @@ validateIsClosingTx params@ParallelAuctionParams {..} ctx@ScriptContext {scriptC
   (holdUtxoRef, _, _) <-
     traceWithIfNothing'
       "Consumes not exactly 1 hold state"
-      $ mustHaveOneHold utxos
+      $ extractSingleHold utxos
   traceWithIfFalse'
     "Consumes not exactly as many bidding threads as threads"
-    $ mustHaveBiddingThreadCount utxos pThreadCount
+    $ checkHasBiddingThreadCount utxos pThreadCount
   -- UTxO inputs check (and info extraction)
   (highestBidUtxoRef, highestBidTxOut, _, highestBid) <-
     traceWithIfNothing'
       "Failed to find highest bid"
-      $ mustHaveHighestBid utxos
+      $ extractHighestBid utxos
   threadToken <-
     traceWithIfNothing'
       "Failed to find thread token"
@@ -486,7 +490,7 @@ validateIsClosingTx params@ParallelAuctionParams {..} ctx@ScriptContext {scriptC
   -- Tx constraints checks
   traceWithIfFalse'
     "Closing tx only allowed after deadline"
-    $ checkConstraints (validAfterDeadline pEndTime) ctx
+    $ checkConstraints (mustBeValidAfterDeadline pEndTime) ctx
   traceWithIfFalse'
     "Does not pay back other bids"
     $ checkConstraints (mustPayBackOtherBids utxos) ctx
@@ -544,16 +548,16 @@ scrAddress = scriptAddress . validator
 data ParallelAuctionError
   = TContractError ContractError
   -- FIXME HLS fix: Comment for HLS to work
-  -- | TCurrencyError CurrencyError
-  | CheckError Text.Text
+  | TCurrencyError CurrencyError
+  |  CheckError Text.Text
   deriving stock (Haskell.Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
 makeClassyPrisms ''ParallelAuctionError
 
 -- FIXME HLS fix: Comment for HLS to work
--- instance AsCurrencyError ParallelAuctionError where
---   _CurrencyError = _TCurrencyError
+instance AsCurrencyError ParallelAuctionError where
+  _CurrencyError = _TCurrencyError
 
 instance AsContractError ParallelAuctionError where
   _ContractError = _TContractError
@@ -627,7 +631,7 @@ bid (params@ParallelAuctionParams {..}, bidAmount) = do
           <> Constraints.scriptInstanceLookups scrInst
           <> Constraints.otherScript scr
       constraints =
-        validBeforeDeadline pEndTime
+        mustBeValidBeforeDeadline pEndTime
           <> mustPayBackBid oldThreadBid
           <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
   -- Submit tx
@@ -639,7 +643,7 @@ bid (params@ParallelAuctionParams {..}, bidAmount) = do
     checkOwnBidHighest ownBid highestBid =
       failWithIfFalse
         (CheckError $ toLogT' "Failed since another bid is higher than own bid" ["own bid" .= ownBid, "highest bid" .= highestBid])
-        (mustHaveHigherBid ownBid highestBid)
+        (checkHasHigherBid ownBid highestBid)
     checkSelectUtxo utxos pkHash =
       failWithIfNothing
         (CheckError "Could not find an UTxO index to place bid")
@@ -682,7 +686,7 @@ close params@ParallelAuctionParams {..} = do
       mustIncludeMissingInputDatums =
         mustIncludeHighestBidDatum <> mustIncludeHoldDatum <> mustIncludePayBackBidsDatums
       constraints =
-        validAfterDeadline pEndTime
+        mustBeValidAfterDeadline pEndTime
           <> mustPayBackOtherBids utxos
           <> mustPayOwner params highestBidUtxoRef highestBid
           <> mustTransferAsset params holdUtxoRef highestBid
@@ -697,7 +701,7 @@ close params@ParallelAuctionParams {..} = do
     checkHoldState utxos =
       failWithIfNothing
         (CheckError "Failed to find exactly one hold state")
-        $ mustHaveOneHold utxos
+        $ extractSingleHold utxos
     mustIncludePayBackBidDatum a (oref, txOut, _) = fromMaybe mempty $ do
       dh <- txOutDatumHash txOut
       d <- lookupData a (oref, dh)
@@ -711,16 +715,16 @@ checkBiddingThreadCount utxos threadCount = do
         toLogT
           "Failed since wrong thread UTxO count"
           [ "thread count" .= threadCount,
-            "utxo count" .= biddingThreadCount utxos
+            "utxo count" .= getBiddingThreadCount utxos
           ]
     )
-    (mustHaveBiddingThreadCount utxos threadCount)
+    (checkHasBiddingThreadCount utxos threadCount)
 
 checkHighestBid :: ParallelAuctionUtxos -> ParallelAuctionContract (TxOutRef, TxOut, ParallelAuctionState, Bid)
 checkHighestBid utxos = do
   failWithIfNothing
     (CheckError "Failed to find highest bid")
-    (mustHaveHighestBid utxos)
+    (extractHighestBid utxos)
 
 checkThreadToken :: TxOut -> ParallelAuctionContract Value
 checkThreadToken txOut =
@@ -735,10 +739,10 @@ createBiddingThreads ::
   ParallelAuctionContract [Value]
 createBiddingThreads pkHash threadCount = do
   -- FIXME HLS fix: Uncomment for HLS to work
-  Haskell.undefined
+  -- Haskell.undefined
   -- FIXME HLS fix: Comment for HLS to work
-  -- c <- forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
-  -- pure . toSingleValues . forgedValue $ c
+  c <- forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
+  pure . toSingleValues . forgedValue $ c
 
 toSingleValues :: Value -> [Value]
 toSingleValues v = do
@@ -748,7 +752,7 @@ toSingleValues v = do
 -- | Returns the UTxO which is selected based on pub key hash and size of availabe bidding threads.
 selectUtxoAtIndex :: ParallelAuctionUtxos -> PubKeyHash -> Maybe (Int, TxOutRef, TxOut, ParallelAuctionState)
 selectUtxoAtIndex utxos@ParallelAuctionUtxos {..} pkHash =
-  let threadCount = biddingThreadCount utxos
+  let threadCount = getBiddingThreadCount utxos
       idx = selectUtxoIndex pkHash threadCount
       -- Select either from other bidding threads or the highest
       First utxo =
