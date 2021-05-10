@@ -1,39 +1,33 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
 -- | Note: Heavily relies on Auction in `plutus-use-cases`.
 module ParallelAuctionTrace where
 
-import Text.Pretty.Simple (pPrint, pString, pShow)
-import Text.Pretty.Simple
-import Data.Aeson.Encode.Pretty (encodePretty)
-import qualified Data.Aeson as Aeson
-import Data.Aeson ((.=))
-import qualified Data.Aeson.Text as Aeson
-import Data.ByteString.Lazy.Char8 (unpack)
-import Data.Text.Prettyprint.Doc (Pretty (..), annotate, defaultLayoutOptions, layoutPretty)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import qualified Data.Text.Lazy as LazyText
-import qualified Data.Text.Lazy.Encoding as LazyText
-import qualified Data.Text.Lazy.Builder as LazyText
-import Data.Text.Prettyprint.Doc.Render.String (renderString)
-import Prettyprinter.Render.Terminal
-import Wallet.Emulator
-import Wallet.Emulator.MultiAgent
-import Control.Lens hiding ((.=))
-import Control.Monad.Freer.Extras as Extras
-import Data.Default
+import Control.Lens ( (&), (.~), (<>~), Ixed(ix) )
+import Data.Default ( Default(def) )
 import Data.Functor (void)
-import Ledger
+import qualified Control.Monad.Freer.Extras as Extras
+import Ledger ( PubKeyHash, Value, pubKeyHash )
 import qualified Ledger.Value as Value
 import ParallelAuction
+    ( endpoints,
+      ParallelAuctionParams(ParallelAuctionParams, pThreadCount,
+                            pEndTime) )
 import Plutus.Contract.Trace
+    ( Wallet(Wallet), walletPubKey, defaultDist )
 import Plutus.Trace.Emulator as Emulator
-import Plutus.Trace.Emulator.Types
-import LoggingUtil
+    ( activateContractWallet,
+      callEndpoint,
+      waitNSlots,
+      waitUntilSlot,
+      runEmulatorTraceIO',
+      initialChainState,
+      EmulatorTrace,
+      TraceConfig,
+      EmulatorConfig )
 
 test :: EmulatorTrace () -> IO ()
 test = runEmulatorTraceIO' traceConfig emulatorConfig
@@ -55,7 +49,6 @@ w1 = Wallet 1
 w2 = Wallet 2
 w3 = Wallet 3
 w4 = Wallet 4
-w5 = Wallet 5
 
 walletPubKeyHash :: Wallet -> PubKeyHash
 walletPubKeyHash = pubKeyHash . walletPubKey
@@ -72,7 +65,7 @@ offeredToken = Value.singleton "ffff" "token" 1
 
 -- | Pay the offered token to wallet 1 at initialisation.
 traceConfig :: TraceConfig
-traceConfig = def { showEvent = testShowEvent }
+traceConfig = def -- {showEvent = testShowEvent}
 
 emulatorConfig :: EmulatorConfig
 emulatorConfig =
@@ -103,11 +96,14 @@ testTraceStartCloseBidding = do
   let auction = theAuction
   h1 <- activateContractWallet w1 endpoints
   h2 <- activateContractWallet w2 endpoints
+  -- Start
+  callEndpoint @"start" h1 auction
+  void $ waitNSlots 1
   -- Closing
   void $ waitUntilSlot (pEndTime auction)
   callEndpoint @"close" h2 auction
-  s <- void $ waitNSlots 1
-  Extras.logInfo $ "Exit" ++ show s
+  void $ waitNSlots 1
+  Extras.logInfo @String "Exit"
 
 testTraceSequentialBidding :: EmulatorTrace ()
 testTraceSequentialBidding = do
@@ -154,4 +150,3 @@ testTraceParallelBidding = do
   callEndpoint @"close" h4 auction
   void $ waitNSlots 1
   Extras.logInfo @String "Exit"
-

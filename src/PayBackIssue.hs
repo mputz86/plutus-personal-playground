@@ -28,12 +28,13 @@ import Ledger.AddressMap (UtxoMap)
 import Ledger.Constraints as Constraints
 import qualified Ledger.Typed.Scripts as Scripts
 import Plutus.Contract hiding (when)
-import Plutus.V1.Ledger.Value
-import Plutus.Contracts.Currency as Currency
+-- FIXME HLS fix: Comment for HLS to work
+-- import Plutus.Contracts.Currency (CurrencyError, forgeContract, forgedValue)
 import qualified Plutus.Trace.Emulator as Emulator
+import Plutus.V1.Ledger.Value
 import qualified PlutusTx
 import qualified PlutusTx.AssocMap as AssocMap
-import PlutusTx.Prelude hiding (Semigroup (..))
+import PlutusTx.Prelude hiding (Semigroup (..), (==))
 import qualified Wallet.Emulator.Wallet as Wallet
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
@@ -82,18 +83,18 @@ scrAddress :: Ledger.Address
 scrAddress = scriptAddress validator
 
 -- | Contract errors
---
-
 data PayBackError
   = TContractError ContractError
-  | TCurrencyError Currency.CurrencyError
+  -- FIXME HLS fix: Comment for HLS to work
+  -- | TCurrencyError CurrencyError
   deriving stock (Haskell.Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
 makeClassyPrisms ''PayBackError
 
-instance Currency.AsCurrencyError PayBackError where
-  _CurrencyError = _TCurrencyError
+-- FIXME HLS fix: Comment for HLS to work
+-- instance AsCurrencyError PayBackError where
+--   _CurrencyError = _TCurrencyError
 
 instance AsContractError PayBackError where
   _ContractError = _TContractError
@@ -107,16 +108,17 @@ type PayBackSchema =
 type PayBackContract a = Contract () PayBackSchema PayBackError a
 
 -- | Contract endpoints
---
-
 start :: PayBackContract ()
 start = do
   ownPk <- ownPubKey
   let ownPkHash = pubKeyHash ownPk
       scrInst = inst
       scr = validator
-  tokenCurrency <- Currency.forgeContract ownPkHash [("tracing-token", 1)]
-  let tokenValue = Currency.forgedValue tokenCurrency
+  -- FIXME HLS fix: Comment for HLS to work
+  -- tokenCurrency <- forgeContract ownPkHash [("tracing-token", 1)]
+  -- let tokenValue = forgedValue tokenCurrency
+  -- FIXME HLS fix: Uncomment for HLS to work
+  let tokenValue = undefined
   utxoMap <- utxoAt scrAddress
   let lookups =
         Constraints.unspentOutputs utxoMap
@@ -139,12 +141,12 @@ bid b = do
       ownBid = Bid (Ada.Lovelace b) ownPkHash
   logI' "Trying to place bid" [("pk", show ownPk), ("bid", show b)]
   utxoMap <- utxoAt scrAddress
-  let (oref, txOutTx@TxOutTx{txOutTxOut=txOut}) = head . Map.toList $ utxoMap
+  let (oref, txOutTx@TxOutTx {txOutTxOut = txOut}) = head . Map.toList $ utxoMap
       Just oldBid = txOutTxToBid txOutTx
       tokenValue =
-          let Value x = txOut ^. outValue
-              r = AssocMap.delete Ada.adaSymbol x
-           in Value r
+        let Value x = txOut ^. outValue
+            r = AssocMap.delete Ada.adaSymbol x
+         in Value r
   let lookups =
         Constraints.unspentOutputs utxoMap
           <> Constraints.scriptInstanceLookups scrInst
@@ -175,8 +177,6 @@ endpoints = (start' `select` bid') >> endpoints
     bid' = endpoint @"bid" >>= bid
 
 -- | Tests
---
-
 test :: IO ()
 test = Emulator.runEmulatorTraceIO $ do
   h1 <- Emulator.activateContractWallet w1 endpoints
@@ -209,7 +209,6 @@ walletPubKeyHash :: Wallet.Wallet -> PubKeyHash
 walletPubKeyHash = pubKeyHash . Wallet.walletPubKey
 
 -- | General helpers
-
 txOutTxToBid :: TxOutTx -> Maybe Bid
 txOutTxToBid o = txOutTxDatum o >>= datumToBid
 

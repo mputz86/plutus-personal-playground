@@ -16,7 +16,6 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-{-# OPTIONS_GHC -Wno-missing-signatures #-}
 
 module InputTxDatumsIssue where
 

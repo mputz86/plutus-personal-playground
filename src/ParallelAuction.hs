@@ -18,103 +18,6 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-{-# OPTIONS_GHC -Wno-missing-signatures #-}
-
-module ParallelAuction where
-
-import Control.Lens hiding ((.=))
-import Control.Monad hiding (fmap)
-import Data.Aeson as Aeson (FromJSON, ToJSON, (.=))
-import qualified Data.Aeson as Aeson (Value (..), object)
-import Data.Aeson.Encode.Pretty (encodePretty)
-import qualified Data.Aeson.Types as Aeson
-import Data.Hashable (hash)
-import qualified Data.List as List
-import qualified Data.Map as Map
-import Data.Monoid (First (..), Last (..))
-import qualified Data.Set as Set
-import qualified Data.Text as Text
-import qualified Data.Text.Lazy as LazyText
-import qualified Data.Text.Lazy.Encoding as LazyText
-import GHC.Generics (Generic)
-import Ledger hiding (singleton)
-import Ledger.Ada as Ada
-import Ledger.AddressMap (UtxoMap)
-import Ledger.Constraints as Constraints
-  ( TxConstraints,
-    checkScriptContext,
-    mustIncludeDatum,
-    mustPayToPubKey,
-    mustPayToTheScript,
-    mustSpendScriptOutput,
-    mustValidateIn,
-    otherScript,
-    scriptInstanceLookups,
-    unspentOutputs,
-  )
-import qualified Ledger.Typed.Scripts as Scripts
-import LoggingUtil
-import Plutus.Contract
-  ( AsContractError (_ContractError),
-    BlockchainActions,
-    Contract,
-    Endpoint,
-    awaitTxConfirmed,
-    endpoint,
-    logInfo,
-    ownPubKey,
-    select,
-    submitTxConstraints,
-    submitTxConstraintsWith,
-    throwError,
-    utxoAt,
-    type (.\/),
-  )
-import Plutus.Contract.Types (ContractError)
-import qualified Plutus.Contracts.Currency as Currency
-import qualified Plutus.V1.Ledger.Interval as Interval
-import qualified Plutus.V1.Ledger.Value as Value
-import qualified PlutusTx
-import PlutusTx.AssocMap as AssocMap
-import qualified PlutusTx.Builtins
-import PlutusTx.Prelude
-  ( AdditiveGroup ((-)),
-    AdditiveSemigroup ((+)),
-    Applicative (pure),
-    Bool (..),
-    Eq ((==)),
-    Functor (fmap),
-    Int,
-    Integer,
-    Integral (mod),
-    Maybe (..),
-    Monoid (mempty),
-    Ord (compare, (<), (<=)),
-    Ordering (EQ, GT),
-    Show (show),
-    const,
-    foldl,
-    fromIntegral,
-    fromMaybe,
-    id,
-    isJust,
-    length,
-    mapM_,
-    maximum,
-    mconcat,
-    not,
-    replicate,
-    snd,
-    trace,
-    traceIfFalse,
-    ($),
-    (&&),
-    (.),
-    (<$>),
-  )
-import Text.Pretty.Simple (pPrint, pShow, pString)
-import Prelude (Semigroup (..))
-import qualified Prelude as Haskell
 
 -- Parallel Auction, Idea
 --
@@ -161,6 +64,120 @@ import qualified Prelude as Haskell
 --   - Probably not as long as we check that the UTxO comes from the script
 --   - Does not checking in Contract allow attackers to "infiltrate" invalid UTxOs in the list of honest bidders? I.e. their contracts fail due to a mismatching bidding thread UTxO count)
 --
+module ParallelAuction where
+
+import Control.Lens (Ixed (ix), makeClassyPrisms, (^?))
+import Control.Monad (Monad ((>>), (>>=)), void)
+import Data.Aeson as Aeson (FromJSON, ToJSON, (.=))
+import Data.Hashable (hash)
+import qualified Data.Map as Map
+import Data.Monoid (First (..))
+import qualified Data.Text as Text
+import GHC.Generics (Generic)
+import Ledger
+  ( Ada,
+    Address,
+    Datum (Datum),
+    DatumHash,
+    PubKeyHash,
+    Redeemer (Redeemer),
+    ScriptContext (..),
+    ScriptPurpose (Spending),
+    Slot,
+    TxInInfo (TxInInfo),
+    TxInfo (txInfoInputs),
+    TxOut (TxOut, txOutDatumHash, txOutValue),
+    TxOutRef,
+    TxOutTx (txOutTxOut),
+    Validator,
+    Value,
+    findDatum,
+    getContinuingOutputs,
+    pubKeyHash,
+    scriptAddress,
+    txId,
+    txOutDatum,
+    txOutTxDatum,
+  )
+import Ledger.Ada as Ada (Ada (Lovelace), adaSymbol, toValue)
+import Ledger.Constraints as Constraints
+  ( TxConstraints,
+    checkScriptContext,
+    mustIncludeDatum,
+    mustPayToPubKey,
+    mustPayToTheScript,
+    mustSpendScriptOutput,
+    mustValidateIn,
+    otherScript,
+    scriptInstanceLookups,
+    unspentOutputs,
+  )
+import qualified Ledger.Typed.Scripts as Scripts
+import LoggingUtil
+  ( logI,
+    logI',
+    logInputs,
+    printUtxos,
+    toLogT,
+    toLogT',
+  )
+import Plutus.Contract
+  ( AsContractError (_ContractError),
+    BlockchainActions,
+    Contract,
+    Endpoint,
+    awaitTxConfirmed,
+    endpoint,
+    ownPubKey,
+    select,
+    submitTxConstraints,
+    submitTxConstraintsWith,
+    throwError,
+    utxoAt,
+    type (.\/),
+  )
+import Plutus.Contract.Types (ContractError)
+-- FIXME HLS fix: Comment for HLS to work
+import Plutus.Contracts.Currency (AsCurrencyError (_CurrencyError), CurrencyError, forgeContract, forgedValue)
+import qualified Plutus.V1.Ledger.Interval as Interval
+import qualified Plutus.V1.Ledger.Value as Value
+import qualified PlutusTx
+import PlutusTx.AssocMap as AssocMap (delete, lookup, singleton)
+import PlutusTx.Builtins (String)
+import PlutusTx.Prelude
+  ( AdditiveGroup ((-)),
+    AdditiveSemigroup ((+)),
+    Applicative (pure),
+    Bool (..),
+    Eq ((==)),
+    Functor (fmap),
+    Int,
+    Integer,
+    Integral (mod),
+    Maybe (..),
+    Monoid (mempty),
+    Ord (compare, (<)),
+    Ordering (EQ),
+    Show,
+    foldl,
+    fromIntegral,
+    fromMaybe,
+    isJust,
+    length,
+    mconcat,
+    not,
+    replicate,
+    snd,
+    trace,
+    traceIfFalse,
+    ($),
+    (&&),
+    (.),
+    (<$>),
+    (==),
+  )
+import Prelude (Semigroup (..))
+import qualified Prelude as Haskell
 
 data ParallelAuctionParams = ParallelAuctionParams
   { -- | Receiver of highest bid after auction was closed.
@@ -224,6 +241,7 @@ data UtxoAcc = UtxoAcc
 PlutusTx.unstableMakeIsData ''UtxoAcc
 
 {-# INLINEABLE defaultUtxoAcc #-}
+defaultUtxoAcc :: UtxoAcc
 defaultUtxoAcc = UtxoAcc Nothing [] []
 
 data UtxoAccessor a = UtxoAccessor
@@ -237,6 +255,7 @@ lookupData UtxoAccessor {..} rd = do
   Datum d <- aLookupDataF rd
   PlutusTx.fromData @d d
 
+newUtxoMapAccessor :: Map.Map TxOutRef TxOutTx -> UtxoAccessor a
 newUtxoMapAccessor utxoMap =
   UtxoAccessor
     { aFoldF = foldF,
@@ -250,6 +269,7 @@ newUtxoMapAccessor utxoMap =
       txOutTxDatum txOutTx
 
 {-# INLINEABLE newUtxoTxInfoAccessor #-}
+newUtxoTxInfoAccessor :: TxInfo -> UtxoAccessor a
 newUtxoTxInfoAccessor txInfo =
   UtxoAccessor
     { aFoldF = foldF,
@@ -396,6 +416,7 @@ mustPayBackBid oldBid =
   mustPayToPubKey (bBidder oldBid) (Ada.toValue $ bBid oldBid)
 
 {-# INLINEABLE mustPayBackOtherBids #-}
+mustPayBackOtherBids :: UtxoAcc -> TxConstraints i ParallelAuctionState
 mustPayBackOtherBids UtxoAcc {..} =
   mconcat $ payBack <$> otherBiddingUtxos
   where
@@ -486,9 +507,8 @@ validateCloseAuction params ctx =
 {-# INLINEABLE validateIsClosingTx #-}
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
 validateIsClosingTx params@ParallelAuctionParams {..} ctx@ScriptContext {scriptContextTxInfo = txInfo} = isJust $ do
-  let is = txInfoInputs txInfo
-      utxoAccessor = newUtxoTxInfoAccessor txInfo
-      utxoAcc@(UtxoAcc highestBid otherBids holdStates) = accUtxos @ParallelAuctionState utxoAccessor
+  let utxoAccessor = newUtxoTxInfoAccessor txInfo
+      utxoAcc@(UtxoAcc _ _ _) = accUtxos @ParallelAuctionState utxoAccessor
   -- Tx construction check
   (holdUtxoRef, _, _) <-
     traceWithIfNothing'
@@ -498,7 +518,7 @@ validateIsClosingTx params@ParallelAuctionParams {..} ctx@ScriptContext {scriptC
     "Consumes not exactly as many bidding threads as threads"
     $ mustHaveBiddingThreadCount utxoAcc pThreadCount
   -- UTxO inputs check (and info extraction)
-  (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
+  (highestBidUtxoRef, highestBidTxOut, _, highestBid) <-
     traceWithIfNothing'
       "Failed to find highest bid"
       $ mustHaveHighestBid utxoAcc
@@ -567,14 +587,16 @@ scrAddress = scriptAddress . validator
 -- | Contract Errors
 data ParallelAuctionError
   = TContractError ContractError
-  | TCurrencyError Currency.CurrencyError
+  | -- FIXME HLS fix: Comment for HLS to work
+    TCurrencyError CurrencyError
   | CheckError Text.Text
   deriving stock (Haskell.Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
 makeClassyPrisms ''ParallelAuctionError
 
-instance Currency.AsCurrencyError ParallelAuctionError where
+-- FIXME HLS fix: Comment for HLS to work
+instance AsCurrencyError ParallelAuctionError where
   _CurrencyError = _TCurrencyError
 
 instance AsContractError ParallelAuctionError where
@@ -625,11 +647,11 @@ bid (params@ParallelAuctionParams {..}, bidAmount) = do
   utxoMap <- utxoAt scrAddr
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
-      utxoAcc@(UtxoAcc _ otherBids holdStates) = accUtxos utxoAccessor
+      utxoAcc@(UtxoAcc _ _ _) = accUtxos utxoAccessor
   -- Checks for UTxOs
   checkBiddingThreadCount utxoAcc pThreadCount
   -- Check for highest bid and if own bid is higher
-  (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
+  (_, _, _, highestBid) <-
     checkHighestBid utxoAcc
   checkOwnBidHighest ownBid highestBid
   -- Select any bidding UTxO thread to place own bid
@@ -680,7 +702,7 @@ close params@ParallelAuctionParams {..} = do
   utxoMap <- utxoAt scrAddr
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
-      utxoAcc@(UtxoAcc _ otherBids holdStates) = accUtxos utxoAccessor
+      utxoAcc@(UtxoAcc _ otherBids _) = accUtxos utxoAccessor
   checkBiddingThreadCount utxoAcc pThreadCount
   -- Select winning UTxO
   (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
@@ -726,6 +748,7 @@ close params@ParallelAuctionParams {..} = do
       pure $ mustIncludeDatum d
 
 -- Off-chain checks
+checkBiddingThreadCount :: UtxoAcc -> Integer -> ParallelAuctionContract ()
 checkBiddingThreadCount utxoAcc threadCount = do
   failWithIfFalse
     ( CheckError $
@@ -737,11 +760,13 @@ checkBiddingThreadCount utxoAcc threadCount = do
     )
     (mustHaveBiddingThreadCount utxoAcc threadCount)
 
+checkHighestBid :: UtxoAcc -> ParallelAuctionContract (TxOutRef, TxOut, ParallelAuctionState, Bid)
 checkHighestBid utxoAcc = do
   failWithIfNothing
     (CheckError "Failed to find highest bid")
     (mustHaveHighestBid utxoAcc)
 
+checkThreadToken :: TxOut -> ParallelAuctionContract Value
 checkThreadToken txOut =
   failWithIfNothing
     (CheckError "No thread token found in thread")
@@ -753,8 +778,12 @@ createBiddingThreads ::
   Integer ->
   ParallelAuctionContract [Value]
 createBiddingThreads pkHash threadCount = do
-  c <- Currency.forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
-  pure . toSingleValues . Currency.forgedValue $ c
+  -- FIXME HLS fix: Comment for HLS to work
+  c <- forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
+  pure . toSingleValues . forgedValue $ c
+
+-- FIXME HLS fix: Uncomment for HLS to work
+-- Haskell.undefined
 
 toSingleValues :: Value -> [Value]
 toSingleValues v = do
