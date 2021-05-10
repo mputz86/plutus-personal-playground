@@ -168,8 +168,19 @@ import Utils.LoggingUtil
     toLogT',
   )
 import Utils.UtxoUtil
+  ( UtxoAccessor (..),
+    lookupData,
+    newUtxoMapAccessor,
+    newUtxoTxInfoAccessor,
+  )
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
+
+--
+--
+-- Data
+--
+--
 
 data ParallelAuctionParams = ParallelAuctionParams
   { -- | Receiver of highest bid after auction was closed.
@@ -207,7 +218,7 @@ data ParallelAuctionState
   = -- | State which holds asset
     Hold
   | -- | State for bidding threads
-    --   TODO Should be sufficient to just store pub key hash of bidder since value is at UTxO
+    --   FIXME Should be sufficient to just store pub key hash of bidder since value is at UTxO
     Bidding {dHighestBid :: Bid}
   | -- | Auction was closed
     Finished
@@ -232,6 +243,12 @@ data ParallelAuctionUtxos = ParallelAuctionUtxos
   }
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionUtxos
+
+--
+--
+-- Utxo accessor for off- and on-chain
+--
+--
 
 {-# INLINEABLE defaultParallelAuctionUtxos #-}
 defaultParallelAuctionUtxos :: ParallelAuctionUtxos
@@ -258,6 +275,23 @@ accumulateUtxos a@UtxoAccessor {..} =
             -- Otherwise, just add bid to other bids
             _ -> Just $ r {otherBiddingUtxos = (oref, txOut, b) : otherBiddingUtxos}
         _ -> Nothing
+
+--
+--
+-- Utility functions for validation
+-- FIXME Can they be put in another module? Naively not since INLINEABLE probably breaks.
+--
+--
+
+{-# INLINEABLE traceWithIfNothing' #-}
+traceWithIfNothing' :: PlutusTx.Builtins.String -> Maybe a -> Maybe a
+traceWithIfNothing' s = \case
+  Nothing -> trace s Nothing
+  Just v -> pure v
+
+{-# INLINEABLE traceWithIfFalse' #-}
+traceWithIfFalse' :: PlutusTx.Builtins.String -> Bool -> Maybe ()
+traceWithIfFalse' s v = if not v then trace s Nothing else pure ()
 
 -- | Untyped redeemer for 'InputClose' input.
 {-# INLINEABLE closeRedeemer #-}
@@ -299,6 +333,12 @@ extractThreadToken = snd . splitNativeAndThreadToken
 extractThreadToken' :: TxOut -> Maybe Value
 extractThreadToken' = snd . splitNativeAndThreadToken . txOutValue
 
+--
+--
+-- Utility functions for extracting values out of UTxOs
+--
+--
+
 {-# INLINEABLE getBiddingThreadCount #-}
 getBiddingThreadCount :: ParallelAuctionUtxos -> Integer
 getBiddingThreadCount ParallelAuctionUtxos {..} = length otherBiddingUtxos + length highestBiddingUtxo
@@ -323,6 +363,12 @@ extractHighestBid ParallelAuctionUtxos {highestBiddingUtxo} = do
   b <- extractBid s
   pure (r, o, s, b)
 
+--
+--
+-- Utility functions for checking conditions based on UTxOs
+--
+--
+
 {-# INLINEABLE checkHasBiddingThreadCount #-}
 checkHasBiddingThreadCount :: ParallelAuctionUtxos -> Integer -> Bool
 checkHasBiddingThreadCount utxos = (==) (getBiddingThreadCount utxos)
@@ -331,6 +377,12 @@ checkHasBiddingThreadCount utxos = (==) (getBiddingThreadCount utxos)
 {-# INLINEABLE checkHasHigherBid #-}
 checkHasHigherBid :: Bid -> Bid -> Bool
 checkHasHigherBid (Bid newBid _) (Bid oldBid _) = oldBid < newBid
+
+--
+--
+-- Constraints, checked in off- and on-chain code.
+--
+--
 
 {-# INLINEABLE mustBeValidAfterDeadline #-}
 mustBeValidAfterDeadline :: Slot -> TxConstraints i o
@@ -401,15 +453,11 @@ mustPayBackOtherBids ParallelAuctionUtxos {..} =
 checkConstraints :: TxConstraints ParallelAuctionInput ParallelAuctionState -> ScriptContext -> Bool
 checkConstraints = checkScriptContext @ParallelAuctionInput @ParallelAuctionState
 
-{-# INLINEABLE traceWithIfNothing' #-}
-traceWithIfNothing' :: PlutusTx.Builtins.String -> Maybe a -> Maybe a
-traceWithIfNothing' s = \case
-  Nothing -> trace s Nothing
-  Just v -> pure v
-
-{-# INLINEABLE traceWithIfFalse' #-}
-traceWithIfFalse' :: PlutusTx.Builtins.String -> Bool -> Maybe ()
-traceWithIfFalse' s v = if not v then trace s Nothing else pure ()
+--
+--
+-- On-Chain validation
+--
+--
 
 {-# INLINEABLE validateNewBid #-}
 validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
@@ -477,15 +525,14 @@ validateIsClosingTx params@ParallelAuctionParams {..} ctx@ScriptContext {scriptC
   traceWithIfFalse'
     "Consumes not exactly as many bidding threads as threads"
     $ checkHasBiddingThreadCount utxos pThreadCount
-  -- UTxO inputs check (and info extraction)
+  -- UTxO inputs check (and value extraction)
   (highestBidUtxoRef, highestBidTxOut, _, highestBid) <-
     traceWithIfNothing'
       "Failed to find highest bid"
       $ extractHighestBid utxos
   threadToken <-
-    traceWithIfNothing'
-      "Failed to find thread token"
-      $ extractThreadToken' highestBidTxOut
+    traceWithIfNothing' "Failed to find thread token" $
+      extractThreadToken' highestBidTxOut
   let totalThreadTokensValue = Value.scale pThreadCount threadToken
   -- Tx constraints checks
   traceWithIfFalse'
@@ -495,14 +542,20 @@ validateIsClosingTx params@ParallelAuctionParams {..} ctx@ScriptContext {scriptC
     "Does not pay back other bids"
     $ checkConstraints (mustPayBackOtherBids utxos) ctx
   traceWithIfFalse'
-    "Constraints check failed"
-    $ checkConstraints
-      ( mustPayOwner params highestBidUtxoRef highestBid
-          <> mustTransferAsset params holdUtxoRef highestBid
-          <> mustReturnThreadTokens totalThreadTokensValue
-      )
-      ctx
-  pure ()
+    "Does not pay back to owner"
+    $ checkConstraints (mustPayOwner params highestBidUtxoRef highestBid) ctx
+  traceWithIfFalse'
+    "Does not transfer asset to highest bidder"
+    $ checkConstraints (mustTransferAsset params holdUtxoRef highestBid) ctx
+  traceWithIfFalse'
+    "Does not return all thread tokens to contract"
+    $ checkConstraints (mustReturnThreadTokens totalThreadTokensValue) ctx
+
+--
+--
+-- On-Chain validator: In essence a state machine
+--
+--
 
 {-# INLINEABLE mkValidator #-}
 mkValidator ::
@@ -544,12 +597,18 @@ validator = Scripts.validatorScript . inst
 scrAddress :: ParallelAuctionParams -> Ledger.Address
 scrAddress = scriptAddress . validator
 
+--
+--
+-- Off-chain contract and endpoints
+--
+--
+
 -- | Contract Errors
 data ParallelAuctionError
   = TContractError ContractError
-  -- FIXME HLS fix: Comment for HLS to work
-  | TCurrencyError CurrencyError
-  |  CheckError Text.Text
+  | -- FIXME HLS fix: Comment for HLS to work
+    TCurrencyError CurrencyError
+  | CheckError Text.Text
   deriving stock (Haskell.Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
@@ -732,7 +791,12 @@ checkThreadToken txOut =
     (CheckError "No thread token found in thread")
     $ extractThreadToken' txOut
 
--- Helper
+--
+--
+-- Off-chain utility functions
+--
+--
+
 createBiddingThreads ::
   PubKeyHash ->
   Integer ->
