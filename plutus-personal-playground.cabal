@@ -18,6 +18,7 @@ library
                      , Plutus.Contracts.Currency
                      , Plutus.Contracts.PubKey
                      , Utils.LoggingUtil
+                     , Utils.UtxoUtil
                      , Week04.Trace
                      , Week04.Vesting
   build-depends:       aeson

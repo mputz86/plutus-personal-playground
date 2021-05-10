@@ -9,7 +9,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PartialTypeSignatures #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -70,7 +69,6 @@ import Control.Lens (Ixed (ix), makeClassyPrisms, (^?))
 import Control.Monad (Monad ((>>), (>>=)), void)
 import Data.Aeson as Aeson (FromJSON, ToJSON, (.=))
 import Data.Hashable (hash)
-import qualified Data.Map as Map
 import Data.Monoid (First (..))
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
@@ -78,26 +76,20 @@ import Ledger
   ( Ada,
     Address,
     Datum (Datum),
-    DatumHash,
     PubKeyHash,
     Redeemer (Redeemer),
     ScriptContext (..),
     ScriptPurpose (Spending),
     Slot,
-    TxInInfo (TxInInfo),
-    TxInfo (txInfoInputs),
     TxOut (TxOut, txOutDatumHash, txOutValue),
     TxOutRef,
-    TxOutTx (txOutTxOut),
     Validator,
     Value,
-    findDatum,
     getContinuingOutputs,
     pubKeyHash,
     scriptAddress,
     txId,
     txOutDatum,
-    txOutTxDatum,
   )
 import Ledger.Ada as Ada (Ada (Lovelace), adaSymbol, toValue)
 import Ledger.Constraints as Constraints
@@ -121,6 +113,7 @@ import Utils.LoggingUtil
     toLogT,
     toLogT',
   )
+import Utils.UtxoUtil
 import Plutus.Contract
   ( AsContractError (_ContractError),
     BlockchainActions,
@@ -159,7 +152,6 @@ import PlutusTx.Prelude
     Ord (compare, (<)),
     Ordering (EQ),
     Show,
-    foldl,
     fromIntegral,
     fromMaybe,
     isJust,
@@ -230,64 +222,26 @@ data ParallelAuctionInput
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
--- Accumulator for UTxOs: Splits all valid UTxOs into a highest bidding UTxO,
--- all other bidding UTxOs and the seen hold UTxOs (should be 1).
-data UtxoAcc = UtxoAcc
+-- Accumulated UTxOs: Splits all valid UTxOs into a highest bidding UTxO,
+-- all other bidding UTxOs and the seen hold UTxOs (but should be 1).
+data ParallelAuctionUtxos = ParallelAuctionUtxos
   { highestBiddingUtxo :: Maybe (TxOutRef, TxOut, ParallelAuctionState),
     otherBiddingUtxos :: [(TxOutRef, TxOut, ParallelAuctionState)],
     holdUtxos :: [(TxOutRef, TxOut, ParallelAuctionState)]
   }
 
-PlutusTx.unstableMakeIsData ''UtxoAcc
+PlutusTx.unstableMakeIsData ''ParallelAuctionUtxos
 
-{-# INLINEABLE defaultUtxoAcc #-}
-defaultUtxoAcc :: UtxoAcc
-defaultUtxoAcc = UtxoAcc Nothing [] []
+{-# INLINEABLE defaultParallelAuctionUtxos #-}
+defaultParallelAuctionUtxos :: ParallelAuctionUtxos
+defaultParallelAuctionUtxos = ParallelAuctionUtxos Nothing [] []
 
-data UtxoAccessor a = UtxoAccessor
-  { aFoldF :: forall b. (b -> (TxOutRef, TxOut) -> b) -> b -> b,
-    aLookupDataF :: (TxOutRef, DatumHash) -> Maybe Datum
-  }
-
-{-# INLINEABLE lookupData #-}
-lookupData :: forall d a. PlutusTx.IsData d => UtxoAccessor a -> (TxOutRef, DatumHash) -> Maybe d
-lookupData UtxoAccessor {..} rd = do
-  Datum d <- aLookupDataF rd
-  PlutusTx.fromData @d d
-
--- | Accessor for 'UtxoMap', so off-chain.
-newUtxoMapAccessor :: Map.Map TxOutRef TxOutTx -> UtxoAccessor a
-newUtxoMapAccessor utxoMap =
-  UtxoAccessor
-    { aFoldF = foldF,
-      aLookupDataF = lookupDataF
-    }
+{-# INLINEABLE accumulateUtxos #-}
+accumulateUtxos :: UtxoAccessor a -> ParallelAuctionUtxos
+accumulateUtxos a@UtxoAccessor {..} =
+  aFoldF step defaultParallelAuctionUtxos
   where
-    foldF :: (b -> (TxOutRef, TxOut) -> b) -> b -> b
-    foldF f i = Map.foldlWithKey' (\a k u -> f a (k, txOutTxOut u)) i utxoMap
-    lookupDataF (oref, _) = do
-      txOutTx <- Map.lookup oref utxoMap
-      txOutTxDatum txOutTx
-
--- | Accessor for 'TxInfo' from 'ScriptContext', so on-chain.
-{-# INLINEABLE newUtxoTxInfoAccessor #-}
-newUtxoTxInfoAccessor :: TxInfo -> UtxoAccessor a
-newUtxoTxInfoAccessor txInfo =
-  UtxoAccessor
-    { aFoldF = foldF,
-      aLookupDataF = lookupDataF
-    }
-  where
-    foldF :: (b -> (TxOutRef, TxOut) -> b) -> b -> b
-    foldF f i = foldl (\a (TxInInfo r o) -> f a (r, o)) i $ txInfoInputs txInfo
-    lookupDataF (_, dh) = findDatum dh txInfo
-
-{-# INLINEABLE accUtxos #-}
-accUtxos :: UtxoAccessor a -> UtxoAcc
-accUtxos a@UtxoAccessor {..} =
-  aFoldF step defaultUtxoAcc
-  where
-    step r@UtxoAcc {..} (oref, txOut) = fromMaybe r $ do
+    step r@ParallelAuctionUtxos {..} (oref, txOut) = fromMaybe r $ do
       dh <- txOutDatum txOut
       case lookupData a (oref, dh) of
         Just h@Hold ->
@@ -302,19 +256,19 @@ accUtxos a@UtxoAccessor {..} =
         _ -> Nothing
 
 {-# INLINEABLE mustHaveOneHold #-}
-mustHaveOneHold :: UtxoAcc -> Maybe (TxOutRef, TxOut, ParallelAuctionState)
-mustHaveOneHold UtxoAcc {..} =
+mustHaveOneHold :: ParallelAuctionUtxos -> Maybe (TxOutRef, TxOut, ParallelAuctionState)
+mustHaveOneHold ParallelAuctionUtxos {..} =
   case holdUtxos of
     [r] -> pure r
     _ -> Nothing
 
 {-# INLINEABLE biddingThreadCount #-}
-biddingThreadCount :: UtxoAcc -> Integer
-biddingThreadCount UtxoAcc {..} = length otherBiddingUtxos + length highestBiddingUtxo
+biddingThreadCount :: ParallelAuctionUtxos -> Integer
+biddingThreadCount ParallelAuctionUtxos {..} = length otherBiddingUtxos + length highestBiddingUtxo
 
 {-# INLINEABLE mustHaveBiddingThreadCount #-}
-mustHaveBiddingThreadCount :: UtxoAcc -> Integer -> Bool
-mustHaveBiddingThreadCount utxoAcc = (==) (biddingThreadCount utxoAcc)
+mustHaveBiddingThreadCount :: ParallelAuctionUtxos -> Integer -> Bool
+mustHaveBiddingThreadCount utxos = (==) (biddingThreadCount utxos)
 
 {-# INLINEABLE extractBid #-}
 extractBid :: ParallelAuctionState -> Maybe Bid
@@ -323,8 +277,8 @@ extractBid = \case
   _ -> Nothing
 
 {-# INLINEABLE mustHaveHighestBid #-}
-mustHaveHighestBid :: UtxoAcc -> Maybe (TxOutRef, TxOut, ParallelAuctionState, Bid)
-mustHaveHighestBid UtxoAcc {highestBiddingUtxo} = do
+mustHaveHighestBid :: ParallelAuctionUtxos -> Maybe (TxOutRef, TxOut, ParallelAuctionState, Bid)
+mustHaveHighestBid ParallelAuctionUtxos {highestBiddingUtxo} = do
   (r, o, s) <- highestBiddingUtxo
   b <- extractBid s
   pure (r, o, s, b)
@@ -418,8 +372,8 @@ mustPayBackBid oldBid =
   mustPayToPubKey (bBidder oldBid) (Ada.toValue $ bBid oldBid)
 
 {-# INLINEABLE mustPayBackOtherBids #-}
-mustPayBackOtherBids :: UtxoAcc -> TxConstraints i ParallelAuctionState
-mustPayBackOtherBids UtxoAcc {..} =
+mustPayBackOtherBids :: ParallelAuctionUtxos -> TxConstraints i ParallelAuctionState
+mustPayBackOtherBids ParallelAuctionUtxos {..} =
   mconcat $ payBack <$> otherBiddingUtxos
   where
     -- FIXME Check if 'mustSpendScriptOutput' should be added to 'mustPayBackBid'
@@ -510,20 +464,20 @@ validateCloseAuction params ctx =
 validateIsClosingTx :: ParallelAuctionParams -> ScriptContext -> Bool
 validateIsClosingTx params@ParallelAuctionParams {..} ctx@ScriptContext {scriptContextTxInfo = txInfo} = isJust $ do
   let utxoAccessor = newUtxoTxInfoAccessor txInfo
-      utxoAcc@(UtxoAcc _ _ _) = accUtxos @ParallelAuctionState utxoAccessor
+      utxos@(ParallelAuctionUtxos _ _ _) = accumulateUtxos @ParallelAuctionState utxoAccessor
   -- Tx construction check
   (holdUtxoRef, _, _) <-
     traceWithIfNothing'
       "Consumes not exactly 1 hold state"
-      $ mustHaveOneHold utxoAcc
+      $ mustHaveOneHold utxos
   traceWithIfFalse'
     "Consumes not exactly as many bidding threads as threads"
-    $ mustHaveBiddingThreadCount utxoAcc pThreadCount
+    $ mustHaveBiddingThreadCount utxos pThreadCount
   -- UTxO inputs check (and info extraction)
   (highestBidUtxoRef, highestBidTxOut, _, highestBid) <-
     traceWithIfNothing'
       "Failed to find highest bid"
-      $ mustHaveHighestBid utxoAcc
+      $ mustHaveHighestBid utxos
   threadToken <-
     traceWithIfNothing'
       "Failed to find thread token"
@@ -535,7 +489,7 @@ validateIsClosingTx params@ParallelAuctionParams {..} ctx@ScriptContext {scriptC
     $ checkConstraints (validAfterDeadline pEndTime) ctx
   traceWithIfFalse'
     "Does not pay back other bids"
-    $ checkConstraints (mustPayBackOtherBids utxoAcc) ctx
+    $ checkConstraints (mustPayBackOtherBids utxos) ctx
   traceWithIfFalse'
     "Constraints check failed"
     $ checkConstraints
@@ -649,16 +603,16 @@ bid (params@ParallelAuctionParams {..}, bidAmount) = do
   utxoMap <- utxoAt scrAddr
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
-      utxoAcc@(UtxoAcc _ _ _) = accUtxos utxoAccessor
+      utxos@(ParallelAuctionUtxos _ _ _) = accumulateUtxos utxoAccessor
   -- Checks for UTxOs
-  checkBiddingThreadCount utxoAcc pThreadCount
+  checkBiddingThreadCount utxos pThreadCount
   -- Check for highest bid and if own bid is higher
   (_, _, _, highestBid) <-
-    checkHighestBid utxoAcc
+    checkHighestBid utxos
   checkOwnBidHighest ownBid highestBid
   -- Select any bidding UTxO thread to place own bid
   (utxoIndex, utxoBidRef, oldBidTxOut, oldThreadBidding) <-
-    checkSelectUtxo utxoAcc ownPkHash
+    checkSelectUtxo utxos ownPkHash
   threadToken <- checkThreadToken oldBidTxOut
   oldThreadBid <- checkOldThreadBid oldThreadBidding
   logI'
@@ -686,10 +640,10 @@ bid (params@ParallelAuctionParams {..}, bidAmount) = do
       failWithIfFalse
         (CheckError $ toLogT' "Failed since another bid is higher than own bid" ["own bid" .= ownBid, "highest bid" .= highestBid])
         (mustHaveHigherBid ownBid highestBid)
-    checkSelectUtxo utxoAcc pkHash =
+    checkSelectUtxo utxos pkHash =
       failWithIfNothing
         (CheckError "Could not find an UTxO index to place bid")
-        $ selectUtxoAtIndex utxoAcc pkHash
+        $ selectUtxoAtIndex utxos pkHash
     checkOldThreadBid oldThreadBidding =
       failWithIfNothing
         (CheckError "No old bid found in bidding thread")
@@ -704,14 +658,14 @@ close params@ParallelAuctionParams {..} = do
   utxoMap <- utxoAt scrAddr
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
-      utxoAcc@(UtxoAcc _ otherBids _) = accUtxos utxoAccessor
-  checkBiddingThreadCount utxoAcc pThreadCount
+      utxos@(ParallelAuctionUtxos _ otherBids _) = accumulateUtxos utxoAccessor
+  checkBiddingThreadCount utxos pThreadCount
   -- Select the UTxO with the highest bid
   (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
-    checkHighestBid utxoAcc
+    checkHighestBid utxos
   threadToken <- checkThreadToken highestBidTxOut
   let totalThreadTokensValue = Value.scale pThreadCount threadToken
-  (holdUtxoRef, _, _) <- checkHoldState utxoAcc
+  (holdUtxoRef, _, _) <- checkHoldState utxos
   logI'
     "Closing auction"
     [ "highest bid" .= highestBid,
@@ -729,7 +683,7 @@ close params@ParallelAuctionParams {..} = do
         mustIncludeHighestBidDatum <> mustIncludeHoldDatum <> mustIncludePayBackBidsDatums
       constraints =
         validAfterDeadline pEndTime
-          <> mustPayBackOtherBids utxoAcc
+          <> mustPayBackOtherBids utxos
           <> mustPayOwner params highestBidUtxoRef highestBid
           <> mustTransferAsset params holdUtxoRef highestBid
           <> mustReturnThreadTokens totalThreadTokensValue
@@ -740,33 +694,33 @@ close params@ParallelAuctionParams {..} = do
   logInputs @ParallelAuctionState ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
   where
-    checkHoldState utxoAcc =
+    checkHoldState utxos =
       failWithIfNothing
         (CheckError "Failed to find exactly one hold state")
-        $ mustHaveOneHold utxoAcc
+        $ mustHaveOneHold utxos
     mustIncludePayBackBidDatum a (oref, txOut, _) = fromMaybe mempty $ do
       dh <- txOutDatumHash txOut
       d <- lookupData a (oref, dh)
       pure $ mustIncludeDatum d
 
 -- Off-chain checks
-checkBiddingThreadCount :: UtxoAcc -> Integer -> ParallelAuctionContract ()
-checkBiddingThreadCount utxoAcc threadCount = do
+checkBiddingThreadCount :: ParallelAuctionUtxos -> Integer -> ParallelAuctionContract ()
+checkBiddingThreadCount utxos threadCount = do
   failWithIfFalse
     ( CheckError $
         toLogT
           "Failed since wrong thread UTxO count"
           [ "thread count" .= threadCount,
-            "utxo count" .= biddingThreadCount utxoAcc
+            "utxo count" .= biddingThreadCount utxos
           ]
     )
-    (mustHaveBiddingThreadCount utxoAcc threadCount)
+    (mustHaveBiddingThreadCount utxos threadCount)
 
-checkHighestBid :: UtxoAcc -> ParallelAuctionContract (TxOutRef, TxOut, ParallelAuctionState, Bid)
-checkHighestBid utxoAcc = do
+checkHighestBid :: ParallelAuctionUtxos -> ParallelAuctionContract (TxOutRef, TxOut, ParallelAuctionState, Bid)
+checkHighestBid utxos = do
   failWithIfNothing
     (CheckError "Failed to find highest bid")
-    (mustHaveHighestBid utxoAcc)
+    (mustHaveHighestBid utxos)
 
 checkThreadToken :: TxOut -> ParallelAuctionContract Value
 checkThreadToken txOut =
@@ -792,9 +746,9 @@ toSingleValues v = do
   replicate (fromIntegral amt) $ Value.singleton s tn 1
 
 -- | Returns the UTxO which is selected based on pub key hash and size of availabe bidding threads.
-selectUtxoAtIndex :: UtxoAcc -> PubKeyHash -> Maybe (Int, TxOutRef, TxOut, ParallelAuctionState)
-selectUtxoAtIndex utxoAcc@UtxoAcc {..} pkHash =
-  let threadCount = biddingThreadCount utxoAcc
+selectUtxoAtIndex :: ParallelAuctionUtxos -> PubKeyHash -> Maybe (Int, TxOutRef, TxOut, ParallelAuctionState)
+selectUtxoAtIndex utxos@ParallelAuctionUtxos {..} pkHash =
+  let threadCount = biddingThreadCount utxos
       idx = selectUtxoIndex pkHash threadCount
       -- Select either from other bidding threads or the highest
       First utxo =
