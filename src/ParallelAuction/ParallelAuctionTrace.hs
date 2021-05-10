@@ -67,7 +67,7 @@ offeredToken = Value.singleton "ffff" "token" 1
 
 -- | Pay the offered token to wallet 1 at initialisation.
 traceConfig :: TraceConfig
-traceConfig = def {showEvent = testShowEvent}
+traceConfig = def {showEvent = showEventPretty}
 
 emulatorConfig :: EmulatorConfig
 emulatorConfig =

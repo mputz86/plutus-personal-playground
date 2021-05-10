@@ -163,7 +163,7 @@ import Utils.LoggingUtil
   ( logI,
     logI',
     logInputs,
-    printUtxos,
+    logUtxos,
     toLogT,
     toLogT',
   )
@@ -653,7 +653,7 @@ start params = do
   ledgerTx <- submitTxConstraints scrInst constraints
   void . awaitTxConfirmed . txId $ ledgerTx
   -- Debug
-  printUtxos' params
+  logUtxos' params
 
 -- | Places bid
 bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
@@ -838,5 +838,5 @@ failWithIfNothing e = \case
   Just a -> pure a
   Nothing -> throwError e
 
-printUtxos' :: ParallelAuctionParams -> ParallelAuctionContract ()
-printUtxos' p = printUtxos @ParallelAuctionState $ scrAddress p
+logUtxos' :: ParallelAuctionParams -> ParallelAuctionContract ()
+logUtxos' p = logUtxos @ParallelAuctionState $ scrAddress p

@@ -11,12 +11,11 @@
 
 module Utils.LoggingUtil where
 
-import Control.Lens (folded, to, (^..), _Just)
+import Control.Lens (folded, to, (^..), _Just, (^?), ix)
 import Data.Aeson (ToJSON, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Text as Aeson
 import Data.ByteString.Lazy.Char8 (pack)
-import qualified Data.HashMap.Strict as HashMap
 import Data.List as List
   ( dropWhile,
     dropWhileEnd,
@@ -29,8 +28,7 @@ import Data.String (String)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Builder as LazyText
-import Data.Text.Prettyprint.Doc (Pretty (..), annotate, defaultLayoutOptions, layoutPretty)
-import Data.Text.Prettyprint.Doc.Render.String (renderString)
+import Data.Text.Prettyprint.Doc (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutPretty)
 import Ledger
   ( Address,
     Datum (Datum),
@@ -72,10 +70,10 @@ import PlutusTx.Prelude
   )
 import Prettyprinter (emptyDoc, line)
 import Prettyprinter.Render.Terminal
-  ( Color (Yellow),
+  ( AnsiStyle,
+    Color (Yellow),
     bold,
-    color,
-    renderLazy,
+    color, renderLazy
   )
 import Text.Pretty.Simple
   ( OutputOptions (outputOptionsCompact),
@@ -97,58 +95,93 @@ import Wallet.Emulator.MultiAgent
 import Prelude (Semigroup (..))
 import qualified Prelude as Haskell
 
--- Emulator Logging
-
--- TODO Make nicer
--- TODO Code style per log-type and info
-testShowEvent :: EmulatorEvent' -> Maybe Haskell.String
-testShowEvent = \case
+-- | Function for showEvent, can be set when running an EmulatorTrace like this:
+--     test :: EmulatorTrace () -> IO ()
+--     test = runEmulatorTraceIO' def {showEvent = testShowEvent} def
+--
+--   Features:
+--   - Prints out pretty, colorful JSONs to terminal
+--   - Tries to extract JSON content from error and prints them pretty and colorful
+--   - Any non-captured event is also colorful and pretty-printed
+showEventPretty :: EmulatorEvent' -> Maybe Haskell.String
+showEventPretty = \case
   UserThreadEvent (UserLog msg) ->
-    Just . LazyText.unpack $ eventMetaData "User" (Haskell.Left msg)
+    Just $ toPrettyLog "User" (Aeson.String . Text.pack $ msg)
   InstanceEvent (ContractInstanceLog (ContractLog json) _ _) ->
-    Just . LazyText.unpack $ eventMetaData "Contract" (Haskell.Right json)
+    Just $ toPrettyLog "Contract" json
   InstanceEvent (ContractInstanceLog (StoppedWithError err) _ _) ->
-    -- Try to parse error string as JSON.
-    let errMsg = List.takeWhile (Haskell./= ' ') err
-        errP = List.filter (Haskell./= '\\') . dropWhile (Haskell./= '{') . dropWhileEnd (Haskell./= '}') $ err
-     in case Aeson.decode @Aeson.Value . pack $ errP of
-          Just j -> Just . LazyText.unpack $ eventMetaData ("Contract " <> LazyText.pack errMsg) (Haskell.Right j)
-          Nothing -> Just . LazyText.unpack $ eventMetaData "Contract" (Haskell.Left $ "ERROR " <> errP)
+    Just $ extractJson err
   InstanceEvent (ContractInstanceLog NoRequestsHandled _ _) -> Nothing
   InstanceEvent (ContractInstanceLog (HandledRequest _) _ _) -> Nothing
   InstanceEvent (ContractInstanceLog (CurrentRequests _) _ _) -> Nothing
   SchedulerEvent _ -> Nothing
   ChainIndexEvent _ _ -> Nothing
   WalletEvent _ _ -> Nothing
-  ev ->
-    Just
-      . renderString
-      . layoutPretty defaultLayoutOptions
-      . pretty
-      $ pShowOpt (defaultOutputOptionsDarkBg {outputOptionsCompact = True}) ev
-  where
-    eventMetaData :: LazyText.Text -> Haskell.Either String Aeson.Value -> LazyText.Text
-    eventMetaData t ev =
-      case ev of
-        Haskell.Left s ->
-          renderLazy . layoutPretty defaultLayoutOptions $
-            annotateEventType t <> annotateTitle (LazyText.pack s)
-        Haskell.Right v -> renderLazy . layoutPretty defaultLayoutOptions $ annotateEventType t <> jsonTitle v <> line <> pretty (jsonToString v)
-    jsonToString =
-      pString
-        . LazyText.unpack
-        . LazyText.toLazyText
-        . Aeson.encodeToTextBuilder
-    annotateEventType t = annotate (color Yellow) . pretty $ "[" <> t <> "] "
-    annotateTitle t = annotate (color Yellow <> bold) . pretty $ t
-    jsonTitle (Aeson.Object m) = case HashMap.lookup "title" m of
-      Just (Aeson.String s) -> annotateTitle s
-      _ -> emptyDoc
-    jsonTitle _ = emptyDoc
+  ev -> Just . renderUnknown $ ev
+
+toPrettyLog :: Text.Text -> Aeson.Value -> String
+toPrettyLog t ev =
+  case ev of
+    (Aeson.String s) ->
+      renderPretty $
+        annotateEventType t <> annotateTitle s
+    v -> renderPretty $ annotateEventType t <> jsonTitle v <> line <> pretty (jsonToString v)
+
+annotateEventType :: Text.Text -> Doc AnsiStyle
+annotateEventType t = annotate (color Yellow) . pretty $ "[" <> t <> "] "
+
+annotateTitle :: Text.Text -> Doc AnsiStyle
+annotateTitle = annotate (color Yellow <> bold) . pretty
+
+jsonTitle :: Aeson.Value -> Doc AnsiStyle
+jsonTitle (Aeson.Object m) = case m ^? ix "title" of
+  Just (Aeson.String s) -> annotateTitle s
+  _ -> emptyDoc
+jsonTitle _ = emptyDoc
+
+extractJson :: String -> String
+extractJson msg =
+  let prefix =
+        List.dropWhileEnd (Haskell.== ' ')
+          . List.takeWhile (Haskell./= '{')
+          $ msg
+      jsonS =
+        List.filter (Haskell./= '\\')
+          . dropWhile (Haskell./= '{')
+          . dropWhileEnd (Haskell./= '}')
+          $ msg
+   in case Aeson.decode @Aeson.Value . pack $ jsonS of
+        Just j -> toPrettyLog ("Contract " <> Text.pack prefix) j
+        Nothing -> toPrettyLog "Contract" (Aeson.String . Text.pack $ "ERROR " <> msg)
+
+renderUnknown :: EmulatorEvent' -> String
+renderUnknown =
+  renderPretty
+    . pretty
+    . pShowOpt (defaultOutputOptionsDarkBg {outputOptionsCompact = True})
+
+jsonToString :: Aeson.Value -> LazyText.Text
+jsonToString = pString . LazyText.unpack . LazyText.toLazyText . Aeson.encodeToTextBuilder
+
+renderPretty :: Doc AnsiStyle -> String
+renderPretty = LazyText.unpack . renderLazy . layoutPretty defaultLayoutOptions
 
 --
--- Contract Logging
+--
+-- Logging helpers for Contract
+--
+--
 
+logI :: Text.Text -> Contract w s e ()
+logI = Contract.logInfo
+
+logI' :: Text.Text -> [(Text.Text, Aeson.Value)] -> Contract w s e ()
+logI' t m = Contract.logInfo $ toLogS t m
+
+logI'' :: ToJSON a => Text.Text -> Text.Text -> a -> Contract w s e ()
+logI'' t k v = logI' t [k .= v]
+
+-- | Logs all inputs of the given transaction. Together with datum.
 logInputs :: forall state w s e. (PlutusTx.IsData state, ToJSON state) => Tx -> Contract w s e ()
 logInputs ledgerTx = do
   let txIns =
@@ -156,17 +189,18 @@ logInputs ledgerTx = do
           . extractDatum
           . txInType
           <$> Set.toList (txInputs ledgerTx)
-  logI'' "Tx inputs" "tx inputs" txIns
+  logI'' "Transaction inputs" "inputs" txIns
   where
     extractDatum (ConsumeScriptAddress _ _ (Datum d)) = Just d
     extractDatum _ = Nothing
 
-printUtxos ::
+-- | Logs value and datum of UTxOs
+logUtxos ::
   forall state w s e.
   (AsContractError e, HasBlockchainActions s, PlutusTx.IsData state, ToJSON state) =>
   Ledger.Address ->
   Contract w s e ()
-printUtxos scrAddr = do
+logUtxos scrAddr = do
   utxoMap <- utxoAt scrAddr
   let datums =
         utxoMap
@@ -179,11 +213,12 @@ printUtxos scrAddr = do
     "UTxOs"
     [ "script address" .= scrAddr,
       "UTxO count" .= Map.size utxoMap,
-      "datum" .= datums
+      "utxo datums" .= datums
     ]
 
-logUTxOSize :: Maybe Text.Text -> UtxoMap -> Contract w s e ()
-logUTxOSize title utxoMap =
+-- | Logs the UTxO count
+logUtxoSize :: Maybe Text.Text -> UtxoMap -> Contract w s e ()
+logUtxoSize title utxoMap =
   let t = fromMaybe "UTxO size of script" title
    in logI'' t "size" $ Map.size utxoMap
 
@@ -199,12 +234,3 @@ toLogT' t m =
     . LazyText.toLazyText
     . Aeson.encodeToTextBuilder
     $ toLogS t m
-
-logI :: Text.Text -> Contract w s e ()
-logI = Contract.logInfo
-
-logI' :: Text.Text -> [(Text.Text, Aeson.Value)] -> Contract w s e ()
-logI' t m = Contract.logInfo $ toLogS t m
-
-logI'' :: ToJSON a => Text.Text -> Text.Text -> a -> Contract w s e ()
-logI'' t k v = logI' t [k .= v]
