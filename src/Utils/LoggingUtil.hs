@@ -9,7 +9,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
-module LoggingUtil where
+module Utils.LoggingUtil where
 
 import Control.Lens (folded, to, (^..), _Just)
 import Data.Aeson (ToJSON, (.=))

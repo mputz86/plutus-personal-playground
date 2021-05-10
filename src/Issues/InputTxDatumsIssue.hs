@@ -17,7 +17,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
-module InputTxDatumsIssue where
+module Issues.InputTxDatumsIssue where
 
 import Control.Lens ( (^..), _Just, to, folded )
 import Control.Monad ( Monad((>>)), void )

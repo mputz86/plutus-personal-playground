@@ -64,7 +64,7 @@
 --   - Probably not as long as we check that the UTxO comes from the script
 --   - Does not checking in Contract allow attackers to "infiltrate" invalid UTxOs in the list of honest bidders? I.e. their contracts fail due to a mismatching bidding thread UTxO count)
 --
-module ParallelAuction where
+module ParallelAuction.ParallelAuction where
 
 import Control.Lens (Ixed (ix), makeClassyPrisms, (^?))
 import Control.Monad (Monad ((>>), (>>=)), void)
@@ -113,7 +113,7 @@ import Ledger.Constraints as Constraints
     unspentOutputs,
   )
 import qualified Ledger.Typed.Scripts as Scripts
-import LoggingUtil
+import Utils.LoggingUtil
   ( logI,
     logI',
     logInputs,
@@ -138,7 +138,7 @@ import Plutus.Contract
   )
 import Plutus.Contract.Types (ContractError)
 -- FIXME HLS fix: Comment for HLS to work
-import Plutus.Contracts.Currency (AsCurrencyError (_CurrencyError), CurrencyError, forgeContract, forgedValue)
+-- import Plutus.Contracts.Currency (AsCurrencyError (_CurrencyError), CurrencyError, forgeContract, forgedValue)
 import qualified Plutus.V1.Ledger.Interval as Interval
 import qualified Plutus.V1.Ledger.Value as Value
 import qualified PlutusTx
@@ -589,8 +589,8 @@ scrAddress = scriptAddress . validator
 -- | Contract Errors
 data ParallelAuctionError
   = TContractError ContractError
-  | -- FIXME HLS fix: Comment for HLS to work
-    TCurrencyError CurrencyError
+  -- FIXME HLS fix: Comment for HLS to work
+  -- | TCurrencyError CurrencyError
   | CheckError Text.Text
   deriving stock (Haskell.Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -598,8 +598,8 @@ data ParallelAuctionError
 makeClassyPrisms ''ParallelAuctionError
 
 -- FIXME HLS fix: Comment for HLS to work
-instance AsCurrencyError ParallelAuctionError where
-  _CurrencyError = _TCurrencyError
+-- instance AsCurrencyError ParallelAuctionError where
+--   _CurrencyError = _TCurrencyError
 
 instance AsContractError ParallelAuctionError where
   _ContractError = _TContractError
@@ -780,12 +780,11 @@ createBiddingThreads ::
   Integer ->
   ParallelAuctionContract [Value]
 createBiddingThreads pkHash threadCount = do
+  -- FIXME HLS fix: Uncomment for HLS to work
+  Haskell.undefined
   -- FIXME HLS fix: Comment for HLS to work
-  c <- forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
-  pure . toSingleValues . forgedValue $ c
-
--- FIXME HLS fix: Uncomment for HLS to work
--- Haskell.undefined
+  -- c <- forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
+  -- pure . toSingleValues . forgedValue $ c
 
 toSingleValues :: Value -> [Value]
 toSingleValues v = do

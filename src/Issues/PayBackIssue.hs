@@ -14,7 +14,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
-module PayBackIssue where
+module Issues.PayBackIssue where
 
 import Control.Lens
 import Control.Monad hiding (fmap)

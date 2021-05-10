@@ -4,7 +4,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 -- | Note: Heavily relies on Auction in `plutus-use-cases`.
-module ParallelAuctionTrace where
+module ParallelAuction.ParallelAuctionTrace where
 
 import Control.Lens ( (&), (.~), (<>~), Ixed(ix) )
 import Data.Default ( Default(def) )
@@ -12,7 +12,7 @@ import Data.Functor (void)
 import qualified Control.Monad.Freer.Extras as Extras
 import Ledger ( PubKeyHash, Value, pubKeyHash )
 import qualified Ledger.Value as Value
-import ParallelAuction
+import ParallelAuction.ParallelAuction
     ( endpoints,
       ParallelAuctionParams(ParallelAuctionParams, pThreadCount,
                             pEndTime) )

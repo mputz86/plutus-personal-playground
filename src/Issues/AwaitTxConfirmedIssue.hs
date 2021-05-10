@@ -10,7 +10,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
-module AwaitTxConfirmedIssue where
+module Issues.AwaitTxConfirmedIssue where
 
 -- Issue brought up by @dino in discord.
 -- - `awaitTxConfirmed` loops forever if validation fails

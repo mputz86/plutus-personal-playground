@@ -10,14 +10,14 @@ License-files:      LICENSE
 
 library
   hs-source-dirs:      src
-  exposed-modules:     AwaitTxConfirmedIssue
-                     , InputTxDatumsIssue
-                     , LoggingUtil
-                     , ParallelAuction
-                     , ParallelAuctionTrace
-                     , PayBackIssue
+  exposed-modules:     Issues.AwaitTxConfirmedIssue
+                     , Issues.InputTxDatumsIssue
+                     , Issues.PayBackIssue
+                     , ParallelAuction.ParallelAuction
+                     , ParallelAuction.ParallelAuctionTrace
                      , Plutus.Contracts.Currency
                      , Plutus.Contracts.PubKey
+                     , Utils.LoggingUtil
                      , Week04.Trace
                      , Week04.Vesting
   build-depends:       aeson
