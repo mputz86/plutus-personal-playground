@@ -597,17 +597,8 @@ bid (params@ParallelAuctionParams{..}, bidAmount) = do
           _ -> Nothing
   let highestBidTxOutValue = highestBidTxOut ^. outValue
       threadTokenMaybe = extractThreadToken highestBidTxOutValue
-  -- let threadUtxoMap = filterBiddingThreadUTxOs utxoMap
   -- Check if thread UTxOs and expected thread count match
-  failWithIfFalse
-    ( CheckError $
-        toLogT
-          "Failed since wrong thread UTxO count"
-          [ "thread count" .= pThreadCount,
-            "utxo count" .= biddingThreadCount utxoAcc
-          ]
-    )
-    (mustHaveBiddingThreadCount utxoAcc pThreadCount)
+  checkBiddingThreadCount utxoAcc pThreadCount
   -- Get highest bid
   failWithIfFalse
     (CheckError $ toLogT' "Failed since another bid is higher than own bid" ["highest bid" .= highestBidBid, "own bid" .= ownBid])
@@ -657,7 +648,7 @@ bid (params@ParallelAuctionParams{..}, bidAmount) = do
 
 -- | Closes auction
 close :: ParallelAuctionParams -> ParallelAuctionContract ()
-close params = do
+close params@ParallelAuctionParams{..} = do
   let scrInst = inst params
       scr = validator params
       scrAddr = scrAddress params
@@ -665,21 +656,10 @@ close params = do
   utxoMap <- utxoAt scrAddr
   -- Debug
   printUtxos' params
-  -- Filter for UTxOs with bidding state
-  let threadUtxoMap = filterBiddingThreadUTxOs utxoMap
-  -- Check if thread UTxOs and expected thread count match
-  failWithIfFalse
-    ( CheckError $
-        toLogT
-          "Failed since wrong thread UTxO count"
-          [ "thread count" .= pThreadCount params,
-            "utxo count" .= Map.size threadUtxoMap
-          ]
-    )
-    (hasCorrectUtxoCount (pThreadCount params) (Map.size threadUtxoMap))
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
-      UtxoAcc highestBid otherBids holdStates = accUtxos utxoAccessor
+      utxoAcc@(UtxoAcc highestBid otherBids holdStates) = accUtxos utxoAccessor
+  checkBiddingThreadCount utxoAcc pThreadCount
   -- Select winning UTxO
   (highestBidUtxoRef, highestBidTxOut, highestBidding) <-
     failWithIfNothing
@@ -697,7 +677,7 @@ close params = do
     failWithIfNothing
       (CheckError "No thread token found in highest bidding thread")
       threadTokenMaybe
-  let threadTokensValue = Value.scale (pThreadCount params) threadToken
+  let threadTokensValue = Value.scale pThreadCount threadToken
   (holdUtxoRef, _, _) <-
     case holdStates of
       [r] -> pure r
@@ -715,9 +695,9 @@ close params = do
       payBacks = mconcat $ payBackBid <$> otherBids
       payBackDatums = mconcat $ payBackBidDatums utxoAccessor <$> otherBids
       -- FIXME Remove since temporary
-      mustIncludeWinningDatum = mustIncludeDatum . Datum . PlutusTx.toData @ParallelAuctionState $ highestBidding
+      mustIncludeHighestBidDatum = mustIncludeDatum . Datum . PlutusTx.toData @ParallelAuctionState $ highestBidding
       constraints =
-        validAfterDeadline (pEndTime params)
+        validAfterDeadline pEndTime
           -- FIXME Ugly
           <> payBacks
           <> mustPayOwner params highestBidUtxoRef highestBidBid
@@ -725,7 +705,7 @@ close params = do
           <> mustReturnThreadTokens threadTokensValue
           -- FIXME Workaround for missing input datum
           <> mustIncludeDatum (Datum $ PlutusTx.toData Hold)
-          <> mustIncludeWinningDatum
+          <> mustIncludeHighestBidDatum
           <> payBackDatums
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
@@ -756,6 +736,17 @@ createBiddingThreads pkHash threadCount = do
   c <- Currency.forgeContract pkHash [("auction-threads", fromIntegral threadCount)]
   pure . toSingleValues . Currency.forgedValue $ c
 
+checkBiddingThreadCount utxoAcc threadCount = do
+  failWithIfFalse
+    ( CheckError $
+        toLogT
+          "Failed since wrong thread UTxO count"
+          [ "thread count" .= threadCount,
+            "utxo count" .= biddingThreadCount utxoAcc
+          ]
+    )
+    (mustHaveBiddingThreadCount utxoAcc threadCount)
+
 toSingleValues :: Value -> [Value]
 toSingleValues v = do
   (s, tn, amt) <- Value.flattenValue v
@@ -764,55 +755,6 @@ toSingleValues v = do
 -- | Selects any of the existing thread UTxO for placing own bid by spending this UTxO.
 selectUtxoIndex :: PubKeyHash -> Integer -> Int
 selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
-
--- | Compares expected thread count with count of bidding UTxO threads.
-hasCorrectUtxoCount :: Integer -> Int -> Bool
-hasCorrectUtxoCount threadCount utxoCount =
-  fromIntegral threadCount Haskell.== utxoCount
-
-txOutTxToBid :: TxOutTx -> Maybe Bid
-txOutTxToBid o = txOutTxDatum o >>= datumToBidInBidding
-
-datumToBidInBidding :: Datum -> Maybe Bid
-datumToBidInBidding (Datum d) =
-  PlutusTx.fromData @ParallelAuctionState d >>= selectBidInBidding
-
-datumToHold :: Datum -> Maybe Bool
-datumToHold (Datum d) =
-  selectHoldInBidding <$> PlutusTx.fromData @ParallelAuctionState d
-
-selectBidInBidding :: ParallelAuctionState -> Maybe Bid
-selectBidInBidding (Bidding b) = Just b
-selectBidInBidding _ = Nothing
-
-selectHoldInBidding :: ParallelAuctionState -> Bool
-selectHoldInBidding Hold = True
-selectHoldInBidding _ = False
-
-highestBidInUTxOs :: UtxoMap -> Maybe Bid
-highestBidInUTxOs utxoMap = do
-  maximumByOf
-    ( folded
-        . Control.Lens.to txOutTxDatum
-        . _Just
-        . Control.Lens.to datumToBidInBidding
-        . _Just
-    )
-    Haskell.compare
-    utxoMap
-
-filterBiddingThreadUTxOs :: UtxoMap -> UtxoMap
-filterBiddingThreadUTxOs utxoMap =
-  Map.fromList $
-    Map.toList utxoMap
-      ^.. folded
-        . filteredBy
-          ( _2
-              . Control.Lens.to txOutTxDatum
-              . _Just
-              . Control.Lens.to datumToBidInBidding
-              . _Just
-          )
 
 -- General Helper
 failWithIfFalse :: ParallelAuctionError -> Bool -> ParallelAuctionContract ()
