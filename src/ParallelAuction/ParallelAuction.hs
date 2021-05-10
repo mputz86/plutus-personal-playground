@@ -230,7 +230,7 @@ data ParallelAuctionInput
 
 PlutusTx.unstableMakeIsData ''ParallelAuctionInput
 
--- Accumulator for UTxOs: Splits all valid UTxOs into a winning bidding UTxO,
+-- Accumulator for UTxOs: Splits all valid UTxOs into a highest bidding UTxO,
 -- all other bidding UTxOs and the seen hold UTxOs (should be 1).
 data UtxoAcc = UtxoAcc
   { highestBiddingUtxo :: Maybe (TxOutRef, TxOut, ParallelAuctionState),
@@ -385,8 +385,8 @@ mustPayAssetFromOwnerToScript = mustPayToTheScript Hold
 
 {-# INLINEABLE mustPayOwner #-}
 mustPayOwner :: ParallelAuctionParams -> TxOutRef -> Bid -> TxConstraints i o
-mustPayOwner params winningUtxoRef highestBid =
-  mustSpendScriptOutput winningUtxoRef closeRedeemer
+mustPayOwner params highestBidUtxoRef highestBid =
+  mustSpendScriptOutput highestBidUtxoRef closeRedeemer
     <> mustPayToPubKey (pOwner params) (Ada.toValue $ bBid highestBid)
 
 {-# INLINEABLE mustTransferAsset #-}
@@ -706,7 +706,7 @@ close params@ParallelAuctionParams {..} = do
   let utxoAccessor = newUtxoMapAccessor utxoMap
       utxoAcc@(UtxoAcc _ otherBids _) = accUtxos utxoAccessor
   checkBiddingThreadCount utxoAcc pThreadCount
-  -- Select winning UTxO
+  -- Select the UTxO with the highest bid
   (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
     checkHighestBid utxoAcc
   threadToken <- checkThreadToken highestBidTxOut
