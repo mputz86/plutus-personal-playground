@@ -16,6 +16,7 @@ library
                      , PayBackIssue
                      , Plutus.Contracts.Currency
                      , Plutus.Contracts.PubKey
+                     , LoggingUtil
   build-depends:       aeson
                      , aeson-pretty
                      , base ^>=4.14.1.0
