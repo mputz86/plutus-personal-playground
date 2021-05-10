@@ -495,11 +495,15 @@ validateIsClosingTx params@ParallelAuctionParams{..} ctx@ScriptContext{scriptCon
   traceWithIfFalse'
      "Consumes not exactly as many bidding threads as threads"
      $ mustHaveBiddingThreadCount utxoAcc pThreadCount
-  -- UTxO inputs check
+  -- UTxO inputs check (and info extraction)
   (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
      traceWithIfNothing'
          "Failed to find highest bid"
         $ mustHaveHighestBid utxoAcc
+  threadToken <- traceWithIfNothing'
+     "Failed to find thread token"
+     $ extractThreadToken' highestBidTxOut
+  let totalThreadTokensValue = Value.scale pThreadCount threadToken
   -- Tx constraints checks
   traceWithIfFalse'
      "Closing tx only allowed after deadline"
@@ -511,7 +515,7 @@ validateIsClosingTx params@ParallelAuctionParams{..} ctx@ScriptContext{scriptCon
      "Constraints check failed"
      $ checkConstraints (mustPayOwner params highestBidUtxoRef highestBid
           <> mustTransferAsset params holdUtxoRef highestBid
-          -- <> mustReturnThreadTokens threadTokensValue
+          <> mustReturnThreadTokens totalThreadTokensValue
           ) ctx
   pure ()
 
@@ -613,11 +617,6 @@ bid (params@ParallelAuctionParams{..}, bidAmount) = do
       scr = validator params
       scrAddr = scrAddress params
       ownBid = Bid (Ada.Lovelace bidAmount) ownPkHash
-  logI'
-    "Trying to place bid"
-    [ "pk hash" .= ownPkHash,
-      "bid" .= bidAmount
-    ]
   utxoMap <- utxoAt scrAddr
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
@@ -630,7 +629,7 @@ bid (params@ParallelAuctionParams{..}, bidAmount) = do
   checkOwnBidHighest ownBid highestBid
   -- Select any bidding UTxO thread to place own bid
   (utxoIndex, utxoBidRef, oldBidTxOut, oldThreadBidding) <-
-      checkSelectUtxoIndex utxoAcc ownPkHash
+      checkSelectUtxo utxoAcc ownPkHash
   threadToken <- checkThreadToken oldBidTxOut
   oldThreadBid <- checkOldThreadBid oldThreadBidding
   logI'
@@ -650,20 +649,18 @@ bid (params@ParallelAuctionParams{..}, bidAmount) = do
           <> mustUseThreadTokenAndPayBid utxoBidRef threadToken ownBid
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
+  -- Debug: Log inputs
+  logInputs @ParallelAuctionState ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
   where
     checkOwnBidHighest ownBid highestBid =
       failWithIfFalse
         (CheckError $ toLogT' "Failed since another bid is higher than own bid" ["own bid" .= ownBid, "highest bid" .= highestBid])
         (mustHaveHigherBid ownBid highestBid)
-    checkSelectUtxoIndex utxoAcc pkHash =
+    checkSelectUtxo utxoAcc pkHash =
         failWithIfNothing
           (CheckError "Could not find an UTxO index to place bid")
           $ selectUtxoAtIndex utxoAcc pkHash
-    checkThreadToken txOut =
-        failWithIfNothing
-          (CheckError "No thread token found in bidding thread")
-          $ extractThreadToken' txOut
     checkOldThreadBid oldThreadBidding =
         failWithIfNothing
           (CheckError "No old bid found in bidding thread")
@@ -675,10 +672,7 @@ close params@ParallelAuctionParams{..} = do
   let scrInst = inst params
       scr = validator params
       scrAddr = scrAddress params
-  logI "Closing auction"
   utxoMap <- utxoAt scrAddr
-  -- Debug
-  printUtxos' params
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
       utxoAcc@(UtxoAcc _ otherBids holdStates) = accUtxos utxoAccessor
@@ -686,13 +680,8 @@ close params@ParallelAuctionParams{..} = do
   -- Select winning UTxO
   (highestBidUtxoRef, highestBidTxOut, highestBidding, highestBid) <-
       checkHighestBid utxoAcc
-  let highestBidTxOutValue = highestBidTxOut ^. outValue
-      threadTokenMaybe = extractThreadToken highestBidTxOutValue
-  threadToken <-
-    failWithIfNothing
-      (CheckError "No thread token found in highest bidding thread")
-      threadTokenMaybe
-  let threadTokensValue = Value.scale pThreadCount threadToken
+  threadToken <- checkThreadToken highestBidTxOut
+  let totalThreadTokensValue = Value.scale pThreadCount threadToken
   (holdUtxoRef, _, _) <- checkHoldState utxoAcc
   logI'
     "Closing auction"
@@ -709,16 +698,16 @@ close params@ParallelAuctionParams{..} = do
       mustIncludePayBackBidsDatums = mconcat $ mustIncludePayBackBidDatum utxoAccessor <$> otherBids
       mustIncludeMissingInputDatums =
           mustIncludeHighestBidDatum <> mustIncludeHoldDatum <> mustIncludePayBackBidsDatums
-      -- Combine constraints
       constraints =
         validAfterDeadline pEndTime
           <> mustPayBackOtherBids utxoAcc
           <> mustPayOwner params highestBidUtxoRef highestBid
           <> mustTransferAsset params holdUtxoRef highestBid
-          <> mustReturnThreadTokens threadTokensValue
+          <> mustReturnThreadTokens totalThreadTokensValue
           <> mustIncludeMissingInputDatums
   -- Submit tx
   ledgerTx <- submitTxConstraintsWith lookups constraints
+  -- Debug: Log inputs
   logInputs @ParallelAuctionState ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
   where
@@ -747,6 +736,11 @@ checkHighestBid utxoAcc = do
   failWithIfNothing
     (CheckError "Failed to find highest bid")
     (mustHaveHighestBid utxoAcc)
+
+checkThreadToken txOut =
+    failWithIfNothing
+      (CheckError "No thread token found in thread")
+      $ extractThreadToken' txOut
 
 -- Helper
 createBiddingThreads ::
