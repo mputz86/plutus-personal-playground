@@ -25,12 +25,13 @@ import Control.Lens hiding ((.=))
 import Control.Monad hiding (fmap)
 import Control.Monad.Freer.Extras as Extras
 import Data.Aeson ((.=))
+import Data.List as List
 import Data.Aeson as Aeson (FromJSON, ToJSON, (.=))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.Aeson.Text as Aeson
 import qualified Data.Aeson.Types as Aeson
-import Data.ByteString.Lazy.Char8 (unpack)
+import Data.ByteString.Lazy.Char8 (pack, unpack)
 import Data.Default
 import Data.Functor (void)
 import qualified Data.HashMap.Strict as HashMap
@@ -142,7 +143,12 @@ testShowEvent = \case
   InstanceEvent (ContractInstanceLog (ContractLog json) _ _) ->
     Just . LazyText.unpack $ eventMetaData "Contract" (Haskell.Right json)
   InstanceEvent (ContractInstanceLog (StoppedWithError err) _ _) ->
-    Just . LazyText.unpack $ eventMetaData "Contract" (Haskell.Left $ "ERROR " <> show err)
+    -- Try to parse error string as JSON.
+    let errMsg = List.takeWhile (Haskell./= ' ') err
+        errP = List.filter (Haskell./= '\\') . dropWhile (Haskell./= '{') . dropWhileEnd (Haskell./= '}') $ err
+     in case Aeson.decode @Aeson.Value . pack $ errP of
+      Just j -> Just . LazyText.unpack $ eventMetaData ("Contract " <> LazyText.pack errMsg) (Haskell.Right j)
+      Nothing -> Just . LazyText.unpack $ eventMetaData "Contract" (Haskell.Left $ "ERROR " <> errP)
   InstanceEvent (ContractInstanceLog NoRequestsHandled _ _) -> Nothing
   InstanceEvent (ContractInstanceLog (HandledRequest _) _ _) -> Nothing
   InstanceEvent (ContractInstanceLog (CurrentRequests _) _ _) -> Nothing
@@ -220,6 +226,13 @@ toLogS t m = Aeson.object $ "title" .= t : m
 
 toLogT :: Text.Text -> [(Text.Text, Aeson.Value)] -> Text.Text
 toLogT t m = LazyText.toStrict . pShow $ toLogS t m
+
+toLogT' :: Text.Text -> [(Text.Text, Aeson.Value)] -> Text.Text
+toLogT' t m =
+    LazyText.toStrict
+        . LazyText.toLazyText
+        . Aeson.encodeToTextBuilder
+        $ toLogS t m
 
 logI :: Text.Text -> Contract w s e ()
 logI = Contract.logInfo
