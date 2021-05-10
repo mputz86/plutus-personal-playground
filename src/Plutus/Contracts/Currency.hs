@@ -14,7 +14,6 @@
 {-# LANGUAGE TypeApplications   #-}
 {-# LANGUAGE TypeOperators      #-}
 {-# LANGUAGE ViewPatterns       #-}
-{-# OPTIONS_GHC -fno-ignore-interface-pragmas #-}
 -- | Implements a custom currency with a monetary policy that allows
 --   the forging of a fixed amount of units.
 module Plutus.Contracts.Currency(
@@ -47,7 +46,7 @@ import qualified Ledger.Ada              as Ada
 import qualified Ledger.Constraints      as Constraints
 import qualified Ledger.Contexts         as V
 import           Ledger.Scripts
-import qualified PlutusTx                as PlutusTx
+import qualified PlutusTx
 
 import qualified Ledger.Typed.Scripts    as Scripts
 import           Ledger.Value            (AssetClass, TokenName, Value)
@@ -58,7 +57,7 @@ import qualified Data.Map                as Map
 import           Data.Semigroup          (Last (..))
 import           GHC.Generics            (Generic)
 import qualified PlutusTx.AssocMap       as AssocMap
-import           Prelude                 (Semigroup (..))
+import           Prelude                 (Semigroup (..), (+))
 import qualified Prelude
 import           Schema                  (ToSchema)
 
@@ -81,7 +80,7 @@ PlutusTx.makeLift ''OneShotCurrency
 currencyValue :: CurrencySymbol -> OneShotCurrency -> Value
 currencyValue s OneShotCurrency{curAmounts = amts} =
     let
-        values = map (\(tn, i) -> (Value.singleton s tn i)) (AssocMap.toList amts)
+        values = map (uncurry (Value.singleton s)) (AssocMap.toList amts)
     in fold values
 
 mkCurrency :: TxOutRef -> [(TokenName, Integer)] -> OneShotCurrency
@@ -116,7 +115,7 @@ validate c@(OneShotCurrency (refHash, refIdx) _) ctx@V.ScriptContext{V.scriptCon
 
 curPolicy :: OneShotCurrency -> MonetaryPolicy
 curPolicy cur = mkMonetaryPolicyScript $
-    $$(PlutusTx.compile [|| \c -> Scripts.wrapMonetaryPolicy (validate c) ||])
+    $$(PlutusTx.compile [|| Scripts.wrapMonetaryPolicy . validate ||])
         `PlutusTx.applyCode`
             PlutusTx.liftCode cur
 
