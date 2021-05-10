@@ -255,6 +255,7 @@ lookupData UtxoAccessor {..} rd = do
   Datum d <- aLookupDataF rd
   PlutusTx.fromData @d d
 
+-- | Accessor for 'UtxoMap', so off-chain.
 newUtxoMapAccessor :: Map.Map TxOutRef TxOutTx -> UtxoAccessor a
 newUtxoMapAccessor utxoMap =
   UtxoAccessor
@@ -268,6 +269,7 @@ newUtxoMapAccessor utxoMap =
       txOutTx <- Map.lookup oref utxoMap
       txOutTxDatum txOutTx
 
+-- | Accessor for 'TxInfo' from 'ScriptContext', so on-chain.
 {-# INLINEABLE newUtxoTxInfoAccessor #-}
 newUtxoTxInfoAccessor :: TxInfo -> UtxoAccessor a
 newUtxoTxInfoAccessor txInfo =
@@ -327,7 +329,7 @@ mustHaveHighestBid UtxoAcc {highestBiddingUtxo} = do
   b <- extractBid s
   pure (r, o, s, b)
 
--- | Requires the new bid (first arg) to be higher.
+-- | Requires the new bid (first arg) to be higher
 {-# INLINEABLE mustHaveHigherBid #-}
 mustHaveHigherBid :: Bid -> Bid -> Bool
 mustHaveHigherBid (Bid newBid _) (Bid oldBid _) = oldBid < newBid
@@ -790,10 +792,7 @@ toSingleValues v = do
   (s, tn, amt) <- Value.flattenValue v
   replicate (fromIntegral amt) $ Value.singleton s tn 1
 
--- | Selects any of the existing thread UTxO for placing own bid by spending this UTxO.
-selectUtxoIndex :: PubKeyHash -> Integer -> Int
-selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
-
+-- | Returns the UTxO which is selected based on pub key hash and size of availabe bidding threads.
 selectUtxoAtIndex :: UtxoAcc -> PubKeyHash -> Maybe (Int, TxOutRef, TxOut, ParallelAuctionState)
 selectUtxoAtIndex utxoAcc@UtxoAcc {..} pkHash =
   let threadCount = biddingThreadCount utxoAcc
@@ -805,6 +804,9 @@ selectUtxoAtIndex utxoAcc@UtxoAcc {..} pkHash =
    in case utxo of
         Just (r, o, s) -> Just (idx, r, o, s)
         Nothing -> Nothing
+
+selectUtxoIndex :: PubKeyHash -> Integer -> Int
+selectUtxoIndex pkHash threadCount = hash pkHash `mod` fromIntegral threadCount
 
 -- General Helper
 failWithIfFalse :: ParallelAuctionError -> Bool -> ParallelAuctionContract ()
