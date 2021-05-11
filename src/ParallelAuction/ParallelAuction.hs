@@ -67,7 +67,7 @@ module ParallelAuction.ParallelAuction where
 
 import Control.Lens (Ixed (ix), makeClassyPrisms, (^?))
 import Control.Monad (Monad ((>>), (>>=)), void)
-import Data.Aeson as Aeson (FromJSON, ToJSON, (.=), toJSON)
+import Data.Aeson as Aeson (FromJSON, ToJSON, (.=))
 import Data.Hashable (hash)
 import Data.Monoid (First (..))
 import qualified Data.Text as Text
