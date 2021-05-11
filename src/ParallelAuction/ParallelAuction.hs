@@ -67,7 +67,7 @@ module ParallelAuction.ParallelAuction where
 
 import Control.Lens (Ixed (ix), makeClassyPrisms, (^?))
 import Control.Monad (Monad ((>>), (>>=)), void)
-import Data.Aeson as Aeson (FromJSON, ToJSON, (.=))
+import Data.Aeson as Aeson (FromJSON, ToJSON, (.=), toJSON)
 import Data.Hashable (hash)
 import Data.Monoid (First (..))
 import qualified Data.Text as Text
@@ -246,7 +246,7 @@ PlutusTx.unstableMakeIsData ''ParallelAuctionUtxos
 
 --
 --
--- Utxo accessor for off- and on-chain
+-- Utxo accessor for off-chain and on-chain
 --
 --
 
@@ -279,7 +279,7 @@ accumulateUtxos a@UtxoAccessor {..} =
 --
 --
 -- Utility functions for validation
--- FIXME Can they be put in another module? Naively not since INLINEABLE probably breaks.
+-- FIXME Can they be put in another module? Should work, but does not.
 --
 --
 
@@ -698,10 +698,17 @@ bid (params@ParallelAuctionParams {..}, bidAmount) = do
   -- Debug: Log inputs
   logInputs @ParallelAuctionState ledgerTx
   void . awaitTxConfirmed . txId $ ledgerTx
+  logUtxos' params
   where
     checkOwnBidHighest ownBid highestBid =
       failWithIfFalse
-        (CheckError $ toLogT' "Failed since another bid is higher than own bid" ["own bid" .= ownBid, "highest bid" .= highestBid])
+        ( CheckError $
+            toLogT'
+              "Failed since another bid is higher than own bid"
+              [ "own bid" .= ownBid,
+                "highest bid" .= highestBid
+              ]
+        )
         (checkHasHigherBid ownBid highestBid)
     checkSelectUtxo utxos pkHash =
       failWithIfNothing

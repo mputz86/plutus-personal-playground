@@ -7,6 +7,7 @@
 module ParallelAuction.ParallelAuctionTrace where
 
 import Control.Lens ( (&), (.~), (<>~), Ixed(ix) )
+import Data.Aeson ((.=))
 import Data.Default ( Default(def) )
 import Data.Functor (void)
 import qualified Control.Monad.Freer.Extras as Extras
@@ -80,11 +81,11 @@ testTraceSimpleBidding = do
   h1 <- activateContractWallet w1 endpoints
   h2 <- activateContractWallet w2 endpoints
   -- Starting
-  Extras.logInfo @String $ "Wallet 1 starts auction"
+  logI "Wallet 1 starts auction"
   callEndpoint @"start" h1 auction
   -- Bidding
   void $ waitUntilSlot 5
-  Extras.logInfo @String $ "Wallet 2 bids"
+  logI "Wallet 2 bids"
   callEndpoint @"bid" h2 (auction, 400)
   -- Closing
   void $ waitUntilSlot (pEndTime auction)
@@ -114,20 +115,20 @@ testTraceSequentialBidding = do
   h2 <- activateContractWallet w2 endpoints
   h3 <- activateContractWallet w3 endpoints
   -- Starting
-  Extras.logInfo @String $ "w1 starts"
+  logI "w1 starts"
   callEndpoint @"start" h1 auction
   -- Bidding
   void $ waitUntilSlot 5
-  Extras.logInfo @String $ "Wallet 2 is bidding"
+  logI "Wallet 2 is bidding"
   callEndpoint @"bid" h2 (auction, 400)
   void $ waitNSlots 1
-  Extras.logInfo @String $ "Wallet 3 is bidding"
+  logI "Wallet 3 is bidding"
   callEndpoint @"bid" h3 (auction, 500)
   -- Closing
   s <- waitUntilSlot (pEndTime auction)
   callEndpoint @"close" h3 auction
   void $ waitNSlots 1
-  Extras.logInfo $ "Exit" ++ show s
+  logI' "Exit" [ "slot" .= s]
 
 testTraceParallelBidding :: EmulatorTrace ()
 testTraceParallelBidding = do
@@ -137,18 +138,18 @@ testTraceParallelBidding = do
   h3 <- activateContractWallet w3 endpoints
   h4 <- activateContractWallet w4 endpoints
   -- Starting
-  Extras.logInfo @String $ "w1 starts"
+  logI "w1 starts"
   callEndpoint @"start" h1 auction
   -- Parallel Bidding
   void $ waitUntilSlot 5
-  Extras.logInfo @String $ "Wallet 2 is bidding"
+  logI "Wallet 2 is bidding"
   callEndpoint @"bid" h2 (auction, 400)
-  Extras.logInfo @String $ "Wallet 2 is bidding"
+  logI "Wallet 2 is bidding"
   callEndpoint @"bid" h4 (auction, 500)
-  Extras.logInfo @String $ "Wallet 3 is bidding"
+  logI "Wallet 3 is bidding"
   callEndpoint @"bid" h3 (auction, 100)
   -- Closing
   void $ waitUntilSlot (pEndTime auction)
   callEndpoint @"close" h4 auction
   void $ waitNSlots 1
-  Extras.logInfo @String "Exit"
+  logI "Exit"

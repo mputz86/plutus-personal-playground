@@ -28,8 +28,10 @@ library
                      , containers
                      , data-default
                      , freer-extras
+                     , freer-simple
                      , hashable
                      , lens
+                     , lens-aeson
                      , playground-common
                      , plutus-contract
                      , plutus-ledger
