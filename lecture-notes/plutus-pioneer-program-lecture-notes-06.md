@@ -4,7 +4,7 @@ date: 2021-05-16T23:27
 
 # Cardano Plutus Pioneer Program: Lecture 6
 
-[Lecture Video](https://www.youtube.com/watch?v=wY7R-PJn66g&t=7993s)
+[Lecture Video](https://www.youtube.com/watch?v=wY7R-PJn66g)
 
 - Fully fledged Dapp (run on mockchain)
 - Contains all pieces for real apps
@@ -176,8 +176,6 @@ mkOracleValidator
 
 
 ## Example Contract Swap, uses Oracle
-
-[Video](https://www.youtube.com/watch?v=wY7R-PJn66g&t=719s)
 
 - Idea
   - Somebody can put ADA in smart contract
@@ -463,7 +461,6 @@ ownFunds' = do
 
 ## Test
 
-[Video](https://www.youtube.com/watch?v=wY7R-PJn66g&t=5926s)
 - Module `Oracle.Test`
   - Test with `EmulatorTrace`
 
