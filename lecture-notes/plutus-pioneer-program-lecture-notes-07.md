@@ -18,13 +18,13 @@ date: 2021-05-24T12:43
 A 0 | A B
   1 | B A
 ```
-  - Like Rock-Paper-Scissors:
+  - Like Rock-Paper-Scissors
   - Gesture for 0 and 1
-  - If equal: A wins, else Bob
+  - If equal: A wins, else B
 
 - Situation: Not in same room
-  - Play via eMail does not work:
-  - A sends here gesture to B
+  - Play via eMail does not work
+  - A sends her gesture to B
   - B knows and can always answer so that he wins
 
 - Cryptographic trick: Commit schemes
@@ -32,7 +32,7 @@ A 0 | A B
   - Done via hash functions
 
 - Hash functions = one way functions
-  - Given has, hard/impossible to get original bytestring
+  - Given hash, hard/impossible to get original bytestring
   - So A sends hash to B (like `hash(0) = ff27...`)
   - B does not know what A has chosen
   - Requires one additional step
@@ -68,7 +68,7 @@ Alice           Bob
    Alice | Claim            |            |
          |            Alice | Reveal     |
          |                  |            |
-         +---------------+-----------+-->O (final state)
+         +------------------+------------+-->O (final state)
 ```
 
 
