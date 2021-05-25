@@ -40,6 +40,7 @@ Using it:
 - [UtxoAccessor](../src/Utils/UtxoAccessor.hs)
   - Unified access for on- and off-chain code in order to create `TxConstraints` more easily.
   - TODO Rewrite as type-class
+- Found [Issue](https://github.com/input-output-hk/plutus/issues/3119) with missing input datums, which is already solved
 
 
 
