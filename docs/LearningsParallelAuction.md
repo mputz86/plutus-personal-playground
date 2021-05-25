@@ -77,17 +77,16 @@ Using it:
   - E.g. `accumulateUtxos` expects an `UtxoAccessor` and returns with `ParallelAuctionUtxos` a data type with all information required to create the constraints
   - Creating accessor off-chain, in `Contract` monad
     ```haskell
-  utxoMap <- utxoAt scrAddr
-  -- Aggregate all UTxOs
-  let utxoAccessor = newUtxoMapAccessor utxoMap
-      utxos@(ParallelAuctionUtxos _ _ _) = accumulateUtxos utxoAccessor
+      utxoMap <- utxoAt scrAddr
+      -- Aggregate all UTxOs
+      let utxoAccessor = newUtxoMapAccessor utxoMap
+          utxos@(ParallelAuctionUtxos _ _ _) = accumulateUtxos utxoAccessor
     ```
-
   - Creating accessor on-chain (`txInfo` is from the `ScriptContext`)
-```haskell
-  let utxoAccessor = newUtxoTxInfoAccessor txInfo
-      utxos@(ParallelAuctionUtxos _ _ _) = accumulateUtxos @ParallelAuctionState utxoAccessor
-```
+    ```haskell
+      let utxoAccessor = newUtxoTxInfoAccessor txInfo
+          utxos@(ParallelAuctionUtxos _ _ _) = accumulateUtxos @ParallelAuctionState utxoAccessor
+    ```
 
 - Naming for validation functions
   - Name own `TxConstraints` by starting with `mustXXX`, similar to provided constraints
