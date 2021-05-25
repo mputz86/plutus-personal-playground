@@ -12,7 +12,8 @@ Note: Heavily relies on source code in/from
 ## Test Case: Parallel Auction
 
 Source code: [src/ParallelAuction.hs](src/ParallelAuction.hs).
-[Details and Learnings](docs/LearningsParallelAuction.md).
+
+**[Details and Learnings](docs/LearningsParallelAuction.md)**.
 
 
 
