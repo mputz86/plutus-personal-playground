@@ -76,12 +76,13 @@ Using it:
     - Provides a way to fold over the UTxOs in order to gather relevant information for validation
   - E.g. `accumulateUtxos` expects an `UtxoAccessor` and returns with `ParallelAuctionUtxos` a data type with all information required to create the constraints
   - Creating accessor off-chain, in `Contract` monad
-```haskell
+    ```haskell
   utxoMap <- utxoAt scrAddr
   -- Aggregate all UTxOs
   let utxoAccessor = newUtxoMapAccessor utxoMap
       utxos@(ParallelAuctionUtxos _ _ _) = accumulateUtxos utxoAccessor
-```
+    ```
+
   - Creating accessor on-chain (`txInfo` is from the `ScriptContext`)
 ```haskell
   let utxoAccessor = newUtxoTxInfoAccessor txInfo
@@ -162,7 +163,7 @@ data ParallelAuctionError
 
 - Logging
   - Needs to be readable
-  - [LoggingUtil](../src/Utils/LoggingUtil.hs)
+  - Created [LoggingUtil](../src/Utils/LoggingUtil.hs)
   - Enhanced logging with `EmulatorTrace`
     - Provides with `showEventPretty` a replacement for the default `showEvent` in `TraceConfig`.
     - Prints out pretty, colorful JSONs to terminal (and repl)
