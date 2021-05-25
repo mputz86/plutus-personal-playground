@@ -102,52 +102,51 @@ Using it:
   - Use `isJust` to convert to final output for validator
   - Use `traceWithIfNothing'` and `traceWithIfFalse'` to exit with tracing if a condition fails
   - See e.g. `validateNewBid`
-```haskell
-validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
-validateNewBid params ctx@ScriptContext {scriptContextPurpose = Spending txOutRef} curBid newBid = isJust $ do
-  -- Ensure new bid is higher than current
-  traceWithIfFalse'
-    "New bid is not higher"
-    (checkHasHigherBid newBid curBid)
-  -- Ensure there is one output which is continued
-  TxOut {txOutValue} <- traceWithIfNothing'
-    "More than one continuing output"
-    $ case getContinuingOutputs ctx of
-      [t] -> Just t
-      _ -> Nothing
-  -- Ensure this output contains the bidding thread token
-  threadToken <-
-    traceWithIfNothing' "Failed to extract thread token" $ extractThreadToken txOutValue
-  -- Check tx constraints
-  -- Check if bid is happending before deadline
-  traceWithIfFalse'
-    "Auction is not open anymore"
-    (checkConstraints (mustBeValidBeforeDeadline $ pEndTime params) ctx)
-  -- ...
-```
+    ```haskell
+    validateNewBid :: ParallelAuctionParams -> ScriptContext -> Bid -> Bid -> Bool
+    validateNewBid params ctx@ScriptContext {scriptContextPurpose = Spending txOutRef} curBid newBid = isJust $ do
+      -- Ensure new bid is higher than current
+      traceWithIfFalse'
+        "New bid is not higher"
+        (checkHasHigherBid newBid curBid)
+      -- Ensure there is one output which is continued
+      TxOut {txOutValue} <- traceWithIfNothing'
+        "More than one continuing output"
+        $ case getContinuingOutputs ctx of
+          [t] -> Just t
+          _ -> Nothing
+      -- Ensure this output contains the bidding thread token
+      threadToken <-
+        traceWithIfNothing' "Failed to extract thread token" $ extractThreadToken txOutValue
+      -- Check tx constraints
+      -- Check if bid is happending before deadline
+      traceWithIfFalse'
+        "Auction is not open anymore"
+        (checkConstraints (mustBeValidBeforeDeadline $ pEndTime params) ctx)
+      -- ...
+    ```
   - TODO: Think about using `Either`
 
 - Off-chain code
   - Similar to `Maybe`, use `throwError` for early exists and non-cascading checks
   - Use helper functions `failWithIfNothing` and `failWithIfFalse`
   - E.g. `bid`
-```haskell
--- | Places bid
-bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
-bid (params@ParallelAuctionParams {..}, bidAmount) = do
-  -- ...
-  -- Checks for UTxOs
-  checkBiddingThreadCount utxos pThreadCount
-  -- Check for highest bid and if own bid is higher
-  (_, _, _, highestBid) <-
-    checkHighestBid utxos
-  checkOwnBidHighest ownBid highestBid
-  -- Select any bidding UTxO thread to place own bid
-  (utxoIndex, utxoBidRef, oldBidTxOut, oldThreadBidding) <-
-    checkSelectUtxo utxos ownPkHash
-  threadToken <- checkThreadToken oldBidTxOut
-
-```
+    ```haskell
+    -- | Places bid
+    bid :: (ParallelAuctionParams, Integer) -> ParallelAuctionContract ()
+    bid (params@ParallelAuctionParams {..}, bidAmount) = do
+      -- ...
+      -- Checks for UTxOs
+      checkBiddingThreadCount utxos pThreadCount
+      -- Check for highest bid and if own bid is higher
+      (_, _, _, highestBid) <-
+        checkHighestBid utxos
+      checkOwnBidHighest ownBid highestBid
+      -- Select any bidding UTxO thread to place own bid
+      (utxoIndex, utxoBidRef, oldBidTxOut, oldThreadBidding) <-
+        checkSelectUtxo utxos ownPkHash
+      threadToken <- checkThreadToken oldBidTxOut
+    ```
 
 - Different errors like `ContractError` or `CurrencyError` can be combined by providing own error, `ParallelAuctionError`
 ```haskell
@@ -172,14 +171,14 @@ data ParallelAuctionError
     - `logI`, `logD`, ... for logging single strings and
     - `logI'`, ... for logging a title along with key values.
     - eg
-  ```haskell
-  logI'
-    "UTxOs"
-    [ "script address" .= scrAddr,
-      "UTxO count" .= Map.size utxoMap,
-      "UTxO datums" .= datums
-    ]
-  ```
+      ```haskell
+      logI'
+        "UTxOs"
+        [ "script address" .= scrAddr,
+          "UTxO count" .= Map.size utxoMap,
+          "UTxO datums" .= datums
+        ]
+      ```
   - Some helper functions for logging UTxOs in `Contract`: For now `logInputs`, `logUtxos`, `logUtxoCount`
 
 
