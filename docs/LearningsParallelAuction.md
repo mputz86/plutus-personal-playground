@@ -149,14 +149,14 @@ Using it:
     ```
 
 - Different errors like `ContractError` or `CurrencyError` can be combined by providing own error, `ParallelAuctionError`
-```haskell
-data ParallelAuctionError
-  = TContractError ContractError
-  | TCurrencyError CurrencyError
-  | CheckError Text.Text
-  deriving stock (Haskell.Eq, Show, Generic)
-  deriving anyclass (ToJSON, FromJSON)
-```
+  ```haskell
+  data ParallelAuctionError
+    = TContractError ContractError
+    | TCurrencyError CurrencyError
+    | CheckError Text.Text
+    deriving stock (Haskell.Eq, Show, Generic)
+    deriving anyclass (ToJSON, FromJSON)
+  ```
   - Plus some more boiler plate
 
 - Logging
