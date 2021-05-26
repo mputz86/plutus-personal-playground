@@ -20,10 +20,20 @@
 --
 -- Usage examples can be found in "ParallelAuction.ParallelAuction" and "ParallelAuction.ParallelAuctionTrace".
 --
+-- Required dependencies (in addition to standard)
+--                   , bytestring
+--                   , data-default
+--                   , freer-simple
+--                   , lens
+--                   , lens-aeson
+--                   , pretty-simple
+--                   , prettyprinter
+--                   , prettyprinter-ansi-terminal
+--
 
 module Utils.LoggingUtil where
 
-import Control.Lens (At (at), folded, ix, to, (%~), (&), (.~), (?~), (^..), (^?), _Just)
+import Control.Lens (At (at), folded, ix, to, (%~), (&), (.~), (?~), (^..), (^?))
 import Control.Monad.Freer (Eff, Member)
 import Control.Monad.Freer.Extras (LogMsg)
 import qualified Control.Monad.Freer.Extras as Extras
@@ -49,7 +59,7 @@ import qualified Data.Text.Lazy.Builder as LazyText
 import Data.Text.Prettyprint.Doc (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutPretty)
 import Ledger
   ( Address,
-    Datum (Datum),
+    Datum (Datum, getDatum),
     Tx (txInputs),
     TxIn (txInType),
     TxInType (ConsumeScriptAddress),
@@ -338,10 +348,9 @@ logUtxos scrAddr = do
   let datums =
         utxoMap
           ^.. folded
-            . Control.Lens.to (\o -> (txOutValue $ txOutTxOut o,) <$> txOutTxDatum o)
-            . _Just
-            . Control.Lens.to (\(v, Datum d) -> (v,) <$> PlutusTx.fromData @state d)
-            . _Just
+            . Control.Lens.to (\o -> (txOutValue $ txOutTxOut o, txOutTxDatum o))
+            -- Map second part of tuple to typed datum
+            . Control.Lens.to (fmap $ fmap (PlutusTx.fromData @state . getDatum))
   logI'
     "UTxOs"
     [ "script address" .= scrAddr,
