@@ -53,6 +53,8 @@ Setup:
   - Install [`direnv`](https://github.com/direnv/direnv)
   - Install [`nix-direnv`](https://github.com/nix-community/nix-direnv)
     - Probably the most complicated step
+    - Easy for everbody who is using `home-manager`
+    - For everybody else: Easiest method is probably the [`.envrc` method](https://github.com/nix-community/nix-direnv#direnv-source_url)
   - Automatically load env by adding `use nix` to `.envrc` in project folder
     ```bash
     > cd plutus-pioneer-program
