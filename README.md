@@ -9,11 +9,11 @@ Note: Heavily relies on source code in/from
 - Some code from [plutus-pioneer-program](https://github.com/input-output-hk/plutus-pioneer-program) was copied for easy reference (in `src/WeekXX` folders like in original repo)
 
 
-## Setup for nix-shell start
+## Setup `nix-shell` Env
 
 ### Simple
 
-Naively, call nix-shell with path to `shell.nix` in plutus repo.
+Naively, call `nix-shell` with path to `shell.nix` in `plutus` repo.
 ```bash
 plutus-pioneer-program/code/week08 $ nix-shell ../../plutus/shell.nix
 ```
@@ -21,17 +21,17 @@ plutus-pioneer-program/code/week08 $ nix-shell ../../plutus/shell.nix
 ### Advanced: Automatic loading on entering project directory
 
 Advantages:
-- Automatically sets up nix-shell when you enter any proect directory
-  - I.e. especially whenever you enter a sub-directory
+- Automatically sets up `nix-shell` when you enter any project directory
+  - Especially whenever you enter a sub-directory
   - Like `cd plutus-pioneer-program/code/week08`
-- Preserves your shell (like zsh)
-  - Instead of nix-shell's default shell, `bash`
+- Preserves your shell (like `zsh`)
+  - Instead of `nix-shell`'s default shell, `bash`
 - Note (maybe good or bad):
   - Installs pre-commit hooks
   - Like formatting nix files
 
 Setup:
-- Add `shell.nix` to project dir (like plutus-pioneer-program)
+- Add `shell.nix` to project dir (like `plutus-pioneer-program`)
   ```nix
   { }:
   let
@@ -49,7 +49,7 @@ Setup:
     ├── plutus-pioneer-program
     ├── plutus-personal-playground
     ```
-- Load nix-shell automatically with direnv
+- Load `nix-shell` automatically with `direnv`
   - Install [`direnv`](https://github.com/direnv/direnv)
   - Install [`nix-direnv`](https://github.com/nix-community/nix-direnv)
     - Probably the most complicated step
@@ -59,7 +59,7 @@ Setup:
     > echo "use nix" >> .envrc
     > direnv allow
     ```
-  - Test by exiting, re-entering and trying to use haskell-language-server
+  - Test by exiting, re-entering and trying to use `haskell-language-server`
     ```bash
     > cd
     > cd -
