@@ -9,7 +9,71 @@ Note: Heavily relies on source code in/from
 - Some code from [plutus-pioneer-program](https://github.com/input-output-hk/plutus-pioneer-program) was copied for easy reference (in `src/WeekXX` folders like in original repo)
 
 
-## Test Case: Parallel Auction
+## Setup for nix-shell start
+
+### Simple
+
+Naively, call nix-shell with path to `shell.nix` in plutus repo.
+```bash
+plutus-pioneer-program/code/week08 $ nix-shell ../../plutus/shell.nix
+```
+
+### Advanced: Automatic loading on entering project directory
+
+Advantages:
+- Automatically sets up nix-shell when you enter any proect directory
+  - I.e. especially whenever you enter a sub-directory
+  - Like `cd plutus-pioneer-program/code/week08`
+- Preserves your shell (like zsh)
+  - Instead of nix-shell's default shell, `bash`
+- Note (maybe good or bad):
+  - Installs pre-commit hooks
+  - Like formatting nix files
+
+Setup:
+- Add `shell.nix` to project dir (like plutus-pioneer-program)
+  ```nix
+  { }:
+  let
+    # Import shell from plutus repo
+    # Makes tools like haskell-language-server available
+    shell = import ./../plutus/shell.nix {};
+  in
+    shell
+  ```
+  - Assumes `plutus` repo is on same level, like
+    ```bash
+    > tree -L 1
+    .
+    ├── plutus
+    ├── plutus-pioneer-program
+    ├── plutus-personal-playground
+    ```
+- Load nix-shell automatically with direnv
+  - Install [`direnv`](https://github.com/direnv/direnv)
+  - Install [`nix-direnv`](https://github.com/nix-community/nix-direnv)
+    - Probably the most complicated step
+  - Automatically load env by adding `use nix` to `.envrc` in project folder
+    ```bash
+    > cd plutus-pioneer-program
+    > echo "use nix" >> .envrc
+    > direnv allow
+    ```
+  - Test by exiting, re-entering and trying to use haskell-language-server
+    ```bash
+    > cd
+    > cd -
+    > haskell-language-server --version
+    haskell-language-server version: 1.1.0.0 (GHC: 8.10.4.20210212) (PATH: /nix/store/ygfxr40id5jsyg2g3yb0drqj0fspp322-haskell-language-server-exe-haskell-language-server-1.1.0.0/bin/haskell-language-server)
+    ```
+
+---
+
+
+## Test Cases
+
+
+### Test Case: Parallel Auction
 
 Source code: [src/ParallelAuction.hs](src/ParallelAuction.hs).
 
@@ -17,7 +81,7 @@ Source code: [src/ParallelAuction.hs](src/ParallelAuction.hs).
 
 
 
-## Test Case: Await Tx Confirmied
+### Await Tx Confirmed
 
 Source code: [src/Issues/AwaitTxConfirmedIssue.hs](src/Issues/AwaitTxConfirmedIssue.hs).
 
@@ -52,7 +116,7 @@ mint amt = do
 
 
 
-## Test Case: Tx Input Datum in Validator / On Chain
+### Tx Input Datum in Validator / On Chain
 
 Source code: [src/InputTxDatumsIssue.hs](src/InputTxDatumsIssue.hs).
 
@@ -73,7 +137,7 @@ Official:
 
 
 
-## Test Case: Payback
+### Test Case: Payback
 
 See [src/PayBackIssue.hs](src/PayBackIssue.hs) for the implementation.
 
