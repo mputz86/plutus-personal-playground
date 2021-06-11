@@ -1,12 +1,16 @@
 
 # Personal Playground
 
+
 Playground for my own personal experiments.
 
 Note: Heavily relies on source code in/from
 - [plutus](https://github.com/input-output-hk/plutus) repository
 - Especially the [use-cases](https://github.com/input-output-hk/plutus/tree/master/plutus-use-cases) project
 - Some code from [plutus-pioneer-program](https://github.com/input-output-hk/plutus-pioneer-program) was copied for easy reference (in `src/WeekXX` folders like in original repo)
+
+
+Sitenote: Just in case you are still looking for a stake pool, [BNR](https://blocknroll101.github.io/) is our.
 
 
 ## Setup `nix-shell` Env
