@@ -32,7 +32,7 @@ date: 2021-06-05T10:11
 - Initial: Factory with a NFT and list of all liquidity pools (initially `[]`)
   - Ensures that only one pool for each possible pair exists
 - In order to add liquidity, Alice adds tokens from A and B
-  - Note: Ration between A and B reflects Alice's believe in relative value of tokens
+  - Note: Ratio between A and B reflects Alice's believe in relative value of tokens
 - Create liquidity pool:
   - Provide tokens A and B
   - Creates a PoolAB, contains
